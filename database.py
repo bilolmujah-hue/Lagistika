@@ -423,6 +423,127 @@ def mark_reminder_done(uid, rid):
         return cur.rowcount > 0
 
 
+# ------------------------------------------------------------------ tahrirlash / o'chirish (yangi)
+
+def owner_doc_rows(uid, owner_type, owner_id):
+    """Egasining BARCHA hujjat qatorlari (plastik karta kabi bir nechtasi bo'lsa ham)."""
+    with db() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM documents WHERE user_id=? AND owner_type=? AND owner_id=? ORDER BY id",
+            (uid, owner_type, owner_id))]
+
+
+def delete_documents_of_type(uid, owner_type, owner_id, doc_type):
+    """Egasining shu turdagi hujjatlarini o'chiradi. O'chirilgan soni qaytadi."""
+    with db() as c:
+        cur = c.execute(
+            "DELETE FROM documents WHERE user_id=? AND owner_type=? AND owner_id=? AND doc_type=?",
+            (uid, owner_type, owner_id, doc_type))
+        return cur.rowcount
+
+
+def update_vehicle(uid, vid, field, value):
+    """plate / model / vin ni o'zgartiradi. -> {'old','new'} | {'error':...} | None (fura topilmadi)."""
+    if field not in ("plate", "model", "vin"):
+        return {"error": "Faqat plate, model yoki vin o'zgartiriladi"}
+    with db() as c:
+        r = c.execute("SELECT * FROM vehicles WHERE id=? AND user_id=?", (vid, uid)).fetchone()
+        if not r:
+            return None
+        if field == "plate":
+            value = norm_plate(value)
+            if not value:
+                return {"error": "Fura raqami noto'g'ri"}
+            dup = c.execute("SELECT id FROM vehicles WHERE user_id=? AND plate=? AND id<>?",
+                            (uid, value, vid)).fetchone()
+            if dup:
+                return {"error": f"{value} raqamli fura allaqachon bor"}
+        else:
+            value = (value or "").strip() or None
+        old = r[field]
+        c.execute(f"UPDATE vehicles SET {field}=? WHERE id=?", (value, vid))
+    return {"old": old, "new": value}
+
+
+def update_driver(uid, did, field, value):
+    """name / phone ni o'zgartiradi. -> {'old','new'} | {'error':...} | None (topilmadi)."""
+    if field not in ("name", "phone"):
+        return {"error": "Faqat name yoki phone o'zgartiriladi"}
+    with db() as c:
+        r = c.execute("SELECT * FROM drivers WHERE id=? AND user_id=?", (did, uid)).fetchone()
+        if not r:
+            return None
+        value = norm_name(value) if field == "name" else ((value or "").strip() or None)
+        if field == "name" and not value:
+            return {"error": "Ism bo'sh bo'lishi mumkin emas"}
+        old = r[field]
+        c.execute(f"UPDATE drivers SET {field}=? WHERE id=?", (value, did))
+    return {"old": old, "new": value}
+
+
+def unassign_driver(uid, vehicle_id):
+    with db() as c:
+        cur = c.execute("UPDATE vehicles SET driver_id=NULL WHERE id=? AND user_id=?", (vehicle_id, uid))
+        return cur.rowcount > 0
+
+
+def delete_vehicle(uid, vid):
+    """Furani va uning hujjatlari/eslatmalarini o'chiradi. -> {'hujjat': n, 'eslatma': n} | None"""
+    with db() as c:
+        if not c.execute("SELECT 1 FROM vehicles WHERE id=? AND user_id=?", (vid, uid)).fetchone():
+            return None
+        nd = c.execute("DELETE FROM documents WHERE user_id=? AND owner_type='vehicle' AND owner_id=?",
+                       (uid, vid)).rowcount
+        nr = c.execute("DELETE FROM reminders WHERE user_id=? AND vehicle_id=?", (uid, vid)).rowcount
+        c.execute("DELETE FROM vehicles WHERE id=? AND user_id=?", (vid, uid))
+    return {"hujjat": nd, "eslatma": nr}
+
+
+def delete_driver(uid, did):
+    """Haydovchini va hujjatlarini o'chiradi, furalardan ajratadi. -> {'hujjat': n} | None"""
+    with db() as c:
+        if not c.execute("SELECT 1 FROM drivers WHERE id=? AND user_id=?", (did, uid)).fetchone():
+            return None
+        c.execute("UPDATE vehicles SET driver_id=NULL WHERE user_id=? AND driver_id=?", (uid, did))
+        nd = c.execute("DELETE FROM documents WHERE user_id=? AND owner_type='driver' AND owner_id=?",
+                       (uid, did)).rowcount
+        c.execute("DELETE FROM drivers WHERE id=? AND user_id=?", (did, uid))
+    return {"hujjat": nd}
+
+
+def get_reminder(uid, rid):
+    with db() as c:
+        r = c.execute("""SELECT r.*, v.plate AS plate FROM reminders r
+                         LEFT JOIN vehicles v ON v.id=r.vehicle_id
+                         WHERE r.id=? AND r.user_id=?""", (rid, uid)).fetchone()
+        return dict(r) if r else None
+
+
+def update_reminder(uid, rid, field, value):
+    """remind_date (sana) yoki title (matn). -> {'old','new'} | None"""
+    if field not in ("remind_date", "title"):
+        return None
+    if field == "remind_date":
+        value = parse_date(value)
+        if not value:
+            return None
+    with db() as c:
+        r = c.execute("SELECT * FROM reminders WHERE id=? AND user_id=?", (rid, uid)).fetchone()
+        if not r:
+            return None
+        old = r[field]
+        c.execute(f"UPDATE reminders SET {field}=? WHERE id=?", (value, rid))
+        if field == "remind_date":  # sana o'zgarsa, eslatma qaytadan yuborilishi uchun
+            c.execute("DELETE FROM sent WHERE key LIKE ?", (f"rem:{rid}:%",))
+    return {"old": old, "new": value}
+
+
+def delete_reminder(uid, rid):
+    with db() as c:
+        cur = c.execute("DELETE FROM reminders WHERE id=? AND user_id=?", (rid, uid))
+        return cur.rowcount > 0
+
+
 # ------------------------------------------------------------------ suhbat tarixi
 
 def save_message(uid, role, content):
