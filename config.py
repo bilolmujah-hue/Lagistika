@@ -9,6 +9,10 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 
+# GPS (Wialon / gpsmonitor.uz)
+WIALON_TOKEN = os.getenv("WIALON_TOKEN", "").strip()
+WIALON_URL = os.getenv("WIALON_URL", "https://1.gpsmonitor.uz/wialon/ajax.html").strip()
+
 # Aniqlik yetmasa EXTRACT_MODEL ni "claude-sonnet-5-5" ga almashtiring (qimmatroq, lekin aniqroq)
 EXTRACT_MODEL = os.getenv("EXTRACT_MODEL", "claude-haiku-5-5")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "claude-haiku-5-5")

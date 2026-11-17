@@ -15,6 +15,7 @@ from aiogram.types import (BufferedInputFile, CallbackQuery, InlineKeyboardButto
 import ai
 import config
 import database as dbm
+import gps
 import reminders
 import tables
 
@@ -28,6 +29,7 @@ BTN_TABLE = "📊 Umumiy jadval"
 BTN_EXPIRING = "⚠️ Muddati yaqinlar"
 BTN_REMINDERS = "⏰ Eslatmalarim"
 BTN_EXCEL = "📥 Excel hisobot"
+BTN_GPS = "📍 GPS joylashuv"
 BTN_HELP = "ℹ️ Yordam"
 
 MAIN_KB = ReplyKeyboardMarkup(
@@ -35,7 +37,7 @@ MAIN_KB = ReplyKeyboardMarkup(
         [KeyboardButton(text=BTN_VEHICLES), KeyboardButton(text=BTN_DRIVERS)],
         [KeyboardButton(text=BTN_TABLE), KeyboardButton(text=BTN_EXPIRING)],
         [KeyboardButton(text=BTN_REMINDERS), KeyboardButton(text=BTN_EXCEL)],
-        [KeyboardButton(text=BTN_HELP)],
+        [KeyboardButton(text=BTN_GPS), KeyboardButton(text=BTN_HELP)],
     ],
     resize_keyboard=True,
 )
@@ -53,6 +55,7 @@ HELP_TEXT = """ℹ️ Men logistika yordamchisiman.
 • 01928WNA ning sug'urta muddatini 06.10.2027 ga o'zgartir
 
 🇨🇳 Xitoy navbati: «01928WNA Xitoydan 20.11.2026 ga navbat oldi» deb yozing. Men Xitoyga kirish va (3 kundan keyin) Rossiyaga chiqish navbatini olishni eslataman.
+📍 GPS: «GPS joylashuv» tugmasi barcha mashinalar holatini, fura kartochkasidagi «Joylashuvi» tugmasi bitta furani xaritada ko'rsatadi.
 📌 Qo'lda eslatma: «25.11.2026 da O'zbekistonga kirish navbati olish eslat», «30.11.2026 da Akfa kompaniyasi to'lovi».
 
 Rang belgilari: 🟢 30 kundan ko'p · 🟡 30 kungacha · 🔴 7 kun va kam yoki o'tgan · 🔵 muddatsiz · ⚪ hujjat yo'q"""
@@ -282,6 +285,21 @@ async def btn_excel(m: Message):
                             caption="📥 Furalar, haydovchilar va eslatmalar (rangli).")
 
 
+@dp.message(F.text == BTN_GPS)
+async def btn_gps(m: Message):
+    await m.bot.send_chat_action(m.chat.id, "typing")
+    try:
+        units = await gps.get_units()
+    except Exception:
+        logging.exception("GPS xatosi")
+        await m.answer("❌ GPS tizimiga ulanib bo'lmadi. Birozdan keyin qayta urinib ko'ring.")
+        return
+    if not units:
+        await m.answer("GPS tizimida mashina topilmadi.")
+        return
+    await send_long(m, gps.fleet_text(units), disable_web_page_preview=True)
+
+
 # ====================================================================== INLINE TUGMALAR
 
 @dp.callback_query(F.data == "vl")
@@ -306,6 +324,7 @@ async def cb_vehicle(cb: CallbackQuery):
         await cb.answer("Fura topilmadi", show_alert=True)
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📍 Joylashuvi (GPS)", callback_data=f"vg:{vid}")],
         [InlineKeyboardButton(text="📎 Hujjat fayllari", callback_data=f"vf:{vid}")],
         [InlineKeyboardButton(text="🔙 Furalar ro'yxati", callback_data="vl")]])
     await safe_edit(cb.message, vehicle_card(uid, v), kb)
@@ -340,6 +359,27 @@ async def _send_owner_files(cb: CallbackQuery, owner_type: str, owner_id: int):
             except Exception:
                 logging.exception("Faylni yuborib bo'lmadi")
     await cb.answer("Saqlangan fayl yo'q" if count == 0 else f"{count} ta fayl yuborildi", show_alert=(count == 0))
+
+
+@dp.callback_query(F.data.startswith("vg:"))
+async def cb_vehicle_gps(cb: CallbackQuery):
+    v = dbm.get_vehicle(cb.from_user.id, int(cb.data[3:]))
+    if not v:
+        await cb.answer("Fura topilmadi", show_alert=True)
+        return
+    await cb.answer("GPS so'ralmoqda...")
+    try:
+        u = gps.find_unit(await gps.get_units(), v["plate"])
+    except Exception:
+        logging.exception("GPS xatosi")
+        await cb.message.answer("❌ GPS tizimiga ulanib bo'lmadi.")
+        return
+    if not u:
+        await cb.message.answer(f"🤷 {v['plate']} GPS tizimida topilmadi. Wialon'dagi mashina nomida shu raqam bo'lishi kerak.")
+        return
+    await cb.message.answer(gps.unit_text(u), disable_web_page_preview=True)
+    if u["lat"] is not None:
+        await cb.message.answer_location(u["lat"], u["lon"])
 
 
 @dp.callback_query(F.data.startswith("vf:"))
