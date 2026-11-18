@@ -8,9 +8,11 @@ from datetime import date, timedelta
 
 from anthropic import AsyncAnthropic
 
+import cargo
 import config
 import database as dbm
 import gps
+import userbot
 
 client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY or "missing")
 
@@ -81,6 +83,8 @@ async def extract_document(data: bytes, mime: str, hint: str = "") -> dict:
 class ChatContext:
     user_id: int
     tables: set = field(default_factory=set)  # "vehicle", "driver"
+    login: bool = False    # userbotni ulash jarayonini boshlash kerak
+    picker: bool = False   # guruh tanlash oynasini ko'rsatish kerak
 
 
 def _t(name, desc, props=None, req=None):
@@ -192,6 +196,21 @@ TOOLS = [
        ["reminder_id", "field", "value"]),
     _t("complete_reminder", "Eslatmani bajarilgan deb belgilash.", {"reminder_id": I}, ["reminder_id"]),
     _t("delete_reminder", "Eslatmani butunlay o'chirish.", {"reminder_id": I}, ["reminder_id"]),
+
+    # ---------------- userbot va yuk qidirish
+    _t("cargo_search",
+       "YUK QIDIRISH. Foydalanuvchi 'Toshkentdan Moskvaga yuk kerak' kabi yozsa shuni chaqiring: userbot ulangan "
+       "guruhlarning oxirgi soatlardagi xabarlarini o'qib, yo'nalishga mos YUK EGALARINI topadi va ularga lichkada "
+       "yozib suhbat boshlaydi. Natijani bot keyin o'zi yuboradi (bu tool darhol qaytadi). origin - qayerdan, "
+       "destination - qayerga (bo'lmasa bo'sh), note - narx chegarasi, yuk turi kabi qo'shimcha shartlar.",
+       {"origin": S, "destination": S, "note": S, "hours": {"type": "integer", "description": "necha soat orqaga (odatda 24)"}},
+       ["origin"]),
+    _t("cargo_status", "Yuk qidiruvlari va yuk egalari bilan suhbatlar holati: kimga yozilgan, kim javob berdi, "
+                       "qaysi biri menejerni kutmoqda, kunlik limit."),
+    _t("userbot_status", "Userbot (shaxsiy akkaunt) ulanganmi va qaysi guruhlar kuzatilmoqda."),
+    _t("userbot_connect", "Userbot akkauntini ulashni boshlash. Telefon raqam va kodni bot o'zi alohida so'raydi - "
+                          "siz faqat qisqa javob bering."),
+    _t("userbot_groups", "Kuzatiladigan guruhlarni tanlash oynasini ochish."),
 
     # ---------------- jadval
     _t("show_table",
@@ -556,6 +575,32 @@ async def run_tool(ctx: ChatContext, name: str, a: dict):
         if name == "delete_reminder":
             return {"ok": dbm.delete_reminder(uid, int(a["reminder_id"]))}
 
+        # ---------------- userbot va yuk qidirish (faqat adminlar)
+        if name in ("cargo_search", "cargo_status", "userbot_status", "userbot_connect", "userbot_groups"):
+            if not config.is_admin(uid):
+                return {"xato": "Bu imkoniyat faqat adminlar uchun (.env da ALLOWED_USERS to'ldirilishi kerak)."}
+
+        if name == "cargo_search":
+            return cargo.start_search(uid, a["origin"], a.get("destination") or "", a.get("note") or "",
+                                      a.get("hours"))
+
+        if name == "cargo_status":
+            return cargo.status_report(uid)
+
+        if name == "userbot_status":
+            return {"ulangan": userbot.is_connected(uid),
+                    "guruhlar": [g["title"] for g in dbm.ub_active_groups(uid)]}
+
+        if name == "userbot_connect":
+            ctx.login = True
+            return {"ok": True, "izoh": "Bot o'zi telefon raqamni so'raydi. Foydalanuvchiga faqat 1 jumla yozing."}
+
+        if name == "userbot_groups":
+            if not userbot.is_connected(uid):
+                return {"xato": "Avval userbotni ulang."}
+            ctx.picker = True
+            return {"ok": True, "izoh": "Guruh tanlash oynasi yuboriladi."}
+
         if name == "show_table":
             kind = a["kind"]
             ctx.tables.update(["vehicle", "driver"] if kind == "both" else [kind])
@@ -602,7 +647,15 @@ Qoidalar:
 9. Markdown belgilaridan (**, #, |) foydalanmang. Oddiy matn va emoji ishlating: 🔴 (7 kun yoki o'tgan),
    🟡 (30 kungacha), 🟢 (30 dan ortiq), 🚛 fura, 👤 haydovchi, 📍 joy, 🛣 masofa.
 10. Asosiy til - o'zbek (lotin). Foydalanuvchi ruscha yozsa, ruscha javob bering.
-11. Aniq va to'liq yozing, ortiqcha gap qo'shmang. Logistikaga aloqasiz savolga qisqa javob bering va asosiy ishga qaytaring."""
+11. Aniq va to'liq yozing, ortiqcha gap qo'shmang. Logistikaga aloqasiz savolga qisqa javob bering va asosiy ishga qaytaring.
+12. Siz userbot (foydalanuvchining shaxsiy Telegram akkaunti) orqali yuk guruhlarini o'qiy olasiz.
+    «Toshkentdan Moskvaga yuk kerak» yoki shunga o'xshash yuk topish so'rovi kelsa - cargo_search ni chaqiring
+    (origin=Toshkent, destination=Moskva; narx chegarasi va boshqa shartlarni note ga yozing) va faqat qisqa javob bering:
+    «Qidirilmoqda...» (guruhlar tekshirilib, yuk egalariga yozilgach bot o'zi xabar beradi). Natijani o'zingizdan to'qimang.
+    Userbot ulanmagan bo'lsa tool xato qaytaradi - foydalanuvchiga userbot_connect ni taklif qiling.
+    «Userbotni ulayman / akkauntni ulayman» desa - userbot_connect; «guruhlarni tanlayman» desa - userbot_groups.
+    Telefon raqam, kod va parolni HECH QACHON suhbatda so'ramang - ularni bot alohida, xavfsiz so'raydi.
+    «Yuk egalari bilan nima bo'ldi» kabi savollarga cargo_status ni chaqiring."""
 
 
 async def chat(user_id: int, text: str):

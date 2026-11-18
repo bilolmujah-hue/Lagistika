@@ -26,6 +26,25 @@ ALLOWED_USERS = {
     int(x) for x in os.getenv("ALLOWED_USERS", "").replace(" ", "").split(",") if x.isdigit()
 }
 
+def is_admin(uid: int) -> bool:
+    """Userbot (shaxsiy akkaunt) faqat ALLOWED_USERS dagi adminlar uchun. Ro'yxat bo'sh bo'lsa - hech kimga."""
+    return bool(ALLOWED_USERS) and uid in ALLOWED_USERS
+
+
+# --- Userbot (Telethon) va yuk qidirish ---
+TG_API_ID = int(os.getenv("TG_API_ID", "0") or 0)          # my.telegram.org -> API development tools
+TG_API_HASH = os.getenv("TG_API_HASH", "").strip()
+SESSION_KEY = os.getenv("SESSION_KEY", "").strip()          # ixtiyoriy: sessiyani bazada shifrlash uchun (Fernet kalit)
+DEAL_MODEL = os.getenv("DEAL_MODEL", "claude-sonnet-5-5")   # yuk egalari bilan suhbat modeli
+COMPANY_NAME = os.getenv("COMPANY_NAME", "logistika kompaniyamiz")
+AUTO_CONTACT = os.getenv("AUTO_CONTACT", "1") == "1"        # 0 bo'lsa: topilganlarga yozishdan oldin admin tasdiqlaydi
+SEARCH_HOURS = 24                                           # guruhlarda necha soat orqaga qidiriladi
+MAX_DMS_PER_DAY = int(os.getenv("MAX_DMS_PER_DAY", "15"))   # kuniga eng ko'pi bilan nechta YANGI odamga yoziladi (ban xavfi uchun)
+MAX_DMS_PER_SEARCH = int(os.getenv("MAX_DMS_PER_SEARCH", "8"))
+DM_DELAY = (60, 180)                                        # yangi odamlarga yozish orasidagi kutish (soniya)
+MAX_AI_TURNS = 12                                           # bitta suhbatda AI eng ko'pi bilan nechta xabar yozadi
+LEAD_COOLDOWN_DAYS = 7                                      # bir odamga shuncha kun ichida qayta yozilmaydi
+
 # --- Rang chegaralari (kun) ---
 RED_DAYS = 7        # 7 kun va undan kam (yoki muddati o'tgan) -> qizil
 YELLOW_DAYS = 30    # 30 kungacha -> sariq, undan ko'p -> yashil

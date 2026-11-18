@@ -4,6 +4,7 @@ Ishga tushirish:  python bot.py
 import asyncio
 import io
 import logging
+import re
 import uuid
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
@@ -13,11 +14,13 @@ from aiogram.types import (BufferedInputFile, CallbackQuery, InlineKeyboardButto
                            InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup)
 
 import ai
+import cargo
 import config
 import database as dbm
 import gps
 import reminders
 import tables
+import userbot
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(config.BOT_TOKEN or "0:missing")
@@ -30,6 +33,7 @@ BTN_EXPIRING = "⚠️ Muddati yaqinlar"
 BTN_REMINDERS = "⏰ Eslatmalarim"
 BTN_EXCEL = "📥 Excel hisobot"
 BTN_GPS = "📍 GPS joylashuv"
+BTN_USERBOT = "🤖 Yuk qidirish (userbot)"
 BTN_HELP = "ℹ️ Yordam"
 
 MAIN_KB = ReplyKeyboardMarkup(
@@ -37,7 +41,8 @@ MAIN_KB = ReplyKeyboardMarkup(
         [KeyboardButton(text=BTN_VEHICLES), KeyboardButton(text=BTN_DRIVERS)],
         [KeyboardButton(text=BTN_TABLE), KeyboardButton(text=BTN_EXPIRING)],
         [KeyboardButton(text=BTN_REMINDERS), KeyboardButton(text=BTN_EXCEL)],
-        [KeyboardButton(text=BTN_GPS), KeyboardButton(text=BTN_HELP)],
+        [KeyboardButton(text=BTN_GPS), KeyboardButton(text=BTN_USERBOT)],
+        [KeyboardButton(text=BTN_HELP)],
     ],
     resize_keyboard=True,
 )
@@ -56,12 +61,15 @@ HELP_TEXT = """ℹ️ Men logistika yordamchisiman.
 
 🇨🇳 Xitoy navbati: «01928WNA Xitoydan 20.11.2026 ga navbat oldi» deb yozing. Men Xitoyga kirish va (3 kundan keyin) Rossiyaga chiqish navbatini olishni eslataman.
 📍 GPS: «GPS joylashuv» tugmasi barcha mashinalar holatini, fura kartochkasidagi «Joylashuvi» tugmasi bitta furani xaritada ko'rsatadi.
+🤖 Yuk qidirish: «🤖 Yuk qidirish» tugmasidan shaxsiy akkauntingizni ulang va yuk guruhlarini tanlang. Keyin «Toshkentdan Moskvaga yuk kerak» deb yozing - qolganini o'zim qilaman.
 📌 Qo'lda eslatma: «25.11.2026 da O'zbekistonga kirish navbati olish eslat», «30.11.2026 da Akfa kompaniyasi to'lovi».
 
 Rang belgilari: 🟢 30 kundan ko'p · 🟡 30 kungacha · 🔴 7 kun va kam yoki o'tgan · 🔵 muddatsiz · ⚪ hujjat yo'q"""
 
 # Tasdiqlashni kutayotgan hujjatlar (bot qayta ishga tushsa, tozalanadi)
 PENDING: dict = {}
+# Userbot ulash bosqichi: user_id -> "phone" | "code" | "password"
+UB_STATE: dict = {}
 
 
 # ====================================================================== RUXSAT
@@ -515,10 +523,241 @@ async def cb_cancel(cb: CallbackQuery):
     await cb.answer()
 
 
+# ====================================================================== USERBOT (YUK QIDIRISH)
+
+def _ub_denied(uid: int) -> str | None:
+    if not config.is_admin(uid):
+        return ("🔒 Userbot shaxsiy akkauntingizga to'liq kirish beradi, shuning uchun faqat adminlarga ochiq.\n"
+                ".env faylida ALLOWED_USERS ga o'z Telegram ID ngizni yozing (ID: /id).")
+    if not config.TG_API_ID or not config.TG_API_HASH:
+        return "⚙️ .env faylida TG_API_ID va TG_API_HASH to'ldirilmagan (my.telegram.org -> API development tools)."
+    return None
+
+
+def ub_menu_view(uid: int):
+    on = userbot.is_connected(uid)
+    groups = dbm.ub_active_groups(uid)
+    lines = [f"🤖 Userbot: {'✅ ulangan' if on else '❌ ulanmagan'}",
+             f"📡 Kuzatilayotgan guruhlar: {len(groups)} ta"]
+    lines += [f"  • {g['title']}" for g in groups[:15]]
+    if on:
+        lines.append("\nEndi yozing, masalan: «Toshkentdan Moskvaga yuk kerak»")
+    rows = []
+    if on:
+        rows.append([InlineKeyboardButton(text="📡 Guruhlarni tanlash", callback_data="ub:groups")])
+        rows.append([InlineKeyboardButton(text="📦 Qidiruvlar holati", callback_data="ub:status")])
+        rows.append([InlineKeyboardButton(text="🔌 Uzish", callback_data="ub:off")])
+    else:
+        rows.append([InlineKeyboardButton(text="🔗 Akkauntni ulash", callback_data="ub:connect")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def start_userbot_login(m: Message, uid: int):
+    UB_STATE[uid] = "phone"
+    await m.answer(
+        "🔗 Userbot ulash.\n\n"
+        "1) Guruhlarda bo'lgan Telegram akkauntingizning telefon raqamini yuboring (masalan +998901234567).\n\n"
+        "⚠️ Bu raqam orqali bot akkauntingizga to'liq kira oladi. Kod va parol Claude'ga yuborilmaydi, "
+        "xabaringiz ulangach o'chiriladi. Bekor qilish: /cancel")
+
+
+async def handle_userbot_login(m: Message, step: str):
+    uid = m.from_user.id
+    text = (m.text or "").strip()
+    try:
+        if step == "phone":
+            phone = "+" + re.sub(r"\D", "", text)
+            if len(phone) < 10:
+                await m.answer("Raqam noto'g'ri. Masalan: +998901234567")
+                return
+            await userbot.login_start(uid, phone)
+            UB_STATE[uid] = "code"
+            await m.answer(
+                "📲 Telegram shu akkauntga kod yubordi (Telegram ilovasida «Telegram» chatiga qarang).\n\n"
+                "2) Kodni raqamlar orasiga tire qo'yib yuboring, masalan: 1-2-3-4-5\n"
+                "(Telegram oddiy yozilgan kodni xavfsizlik uchun bekor qilib yuboradi.)")
+        elif step == "code":
+            code = re.sub(r"\D", "", text)
+            if not code:
+                await m.answer("Kodni raqamlarda yuboring, masalan: 1-2-3-4-5")
+                return
+            res = await userbot.login_code(uid, code)
+            if res == "password":
+                UB_STATE[uid] = "password"
+                await m.answer("🔐 Akkauntda 2 bosqichli parol bor. 3) Shu parolni yuboring:")
+            else:
+                UB_STATE.pop(uid, None)
+                await _after_login(m)
+        elif step == "password":
+            await userbot.login_password(uid, text)
+            UB_STATE.pop(uid, None)
+            await _after_login(m)
+    except Exception as e:
+        logging.warning("Userbot ulashda xato: %s", e)
+        msg = userbot.describe_error(e)
+        if "eskirgan" in msg:
+            UB_STATE[uid] = "phone"
+        await m.answer("❌ " + msg)
+    finally:
+        try:  # kod/parol chatda qolmasin
+            await m.delete()
+        except Exception:
+            pass
+
+
+async def _after_login(m: Message):
+    await m.answer("✅ Userbot ulandi!\n\nEndi yuk e'lonlari yoziladigan guruhlarni tanlang 👇")
+    await show_group_picker(m, m.from_user.id, 0, refresh=True)
+
+
+PICK_PAGE = 10
+
+
+async def show_group_picker(msg: Message, uid: int, page: int, refresh: bool = False, edit: bool = False):
+    if refresh or uid not in userbot.GROUP_CACHE:
+        try:
+            await userbot.list_groups(uid)
+        except Exception:
+            logging.exception("Guruhlar ro'yxati")
+            await msg.answer("❌ Guruhlarni o'qib bo'lmadi.")
+            return
+    groups = userbot.GROUP_CACHE.get(uid, [])
+    if not groups:
+        await msg.answer("Akkauntda guruh topilmadi.")
+        return
+    on = {g["chat_id"] for g in dbm.ub_active_groups(uid)}
+    pages = (len(groups) - 1) // PICK_PAGE + 1
+    page = max(0, min(page, pages - 1))
+    rows = [[InlineKeyboardButton(text=f"{'✅' if g['chat_id'] in on else '▫️'} {g['title']}"[:60],
+                                  callback_data=f"ubt:{g['chat_id']}:{page}")]
+            for g in groups[page * PICK_PAGE:(page + 1) * PICK_PAGE]]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"ubp:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="noop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"ubp:{page + 1}"))
+    rows.append(nav)
+    text = f"📡 Yuk e'lonlari yoziladigan guruhlarni tanlang (✅ = kuzatiladi). Tanlangan: {len(on)} ta"
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    if edit:
+        await safe_edit(msg, text, kb)
+    else:
+        await msg.answer(text, reply_markup=kb)
+
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(m: Message):
+    if UB_STATE.pop(m.from_user.id, None):
+        await userbot.login_cancel(m.from_user.id)
+        await m.answer("Bekor qilindi.")
+    else:
+        await m.answer("Bekor qiladigan narsa yo'q.")
+
+
+@dp.message(F.text == BTN_USERBOT)
+async def btn_userbot(m: Message):
+    UB_STATE.pop(m.from_user.id, None)
+    denied = _ub_denied(m.from_user.id)
+    if denied:
+        await m.answer(denied)
+        return
+    text, kb = ub_menu_view(m.from_user.id)
+    await m.answer(text, reply_markup=kb)
+
+
+@dp.callback_query(F.data == "noop")
+async def cb_noop(cb: CallbackQuery):
+    await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("ub:"))
+async def cb_userbot(cb: CallbackQuery):
+    uid, action = cb.from_user.id, cb.data[3:]
+    denied = _ub_denied(uid)
+    if denied:
+        await cb.answer(denied, show_alert=True)
+        return
+    if action == "connect":
+        await cb.answer()
+        await start_userbot_login(cb.message, uid)
+    elif action == "groups":
+        await cb.answer()
+        await show_group_picker(cb.message, uid, 0, refresh=True)
+    elif action == "status":
+        await cb.answer()
+        await send_long(cb.message, cargo.status_text(uid))
+    elif action == "off":
+        await userbot.disconnect(uid)
+        await safe_edit(cb.message, "🔌 Userbot uzildi (Telegram'dagi sessiya ham o'chirildi).")
+        await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("ubp:"))
+async def cb_group_page(cb: CallbackQuery):
+    if not config.is_admin(cb.from_user.id):
+        await cb.answer("Ruxsat yo'q", show_alert=True)
+        return
+    await show_group_picker(cb.message, cb.from_user.id, int(cb.data[4:]), edit=True)
+    await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("ubt:"))
+async def cb_group_toggle(cb: CallbackQuery):
+    uid = cb.from_user.id
+    if not config.is_admin(uid):
+        await cb.answer("Ruxsat yo'q", show_alert=True)
+        return
+    _, chat_id, page = cb.data.split(":")
+    chat_id = int(chat_id)
+    title = next((g["title"] for g in userbot.GROUP_CACHE.get(uid, []) if g["chat_id"] == chat_id), str(chat_id))
+    on = chat_id in {g["chat_id"] for g in dbm.ub_active_groups(uid)}
+    dbm.ub_set_group(uid, chat_id, title, not on)
+    await show_group_picker(cb.message, uid, int(page), edit=True)
+    await cb.answer("Olib tashlandi" if on else "Qo'shildi")
+
+
+@dp.callback_query(F.data.startswith("cs:"))
+async def cb_continue_outreach(cb: CallbackQuery):
+    uid = cb.from_user.id
+    if not config.is_admin(uid):
+        await cb.answer("Ruxsat yo'q", show_alert=True)
+        return
+    ok = cargo.start_outreach(uid, int(cb.data[3:]))
+    await cb.answer("Yozish boshlandi" if ok else "Yozish allaqachon davom etmoqda", show_alert=not ok)
+
+
+@dp.callback_query(F.data.startswith("ldh:"))
+async def cb_lead_history(cb: CallbackQuery):
+    lead = dbm.get_lead(int(cb.data[4:]))
+    if not lead or lead["user_id"] != cb.from_user.id:
+        await cb.answer("Topilmadi", show_alert=True)
+        return
+    await cb.answer()
+    await send_long(cb.message, "📜 Suhbat:\n\n" + cargo.transcript(lead["id"]))
+
+
+@dp.callback_query(F.data.startswith("ldc:"))
+async def cb_lead_close(cb: CallbackQuery):
+    _, lid, st = cb.data.split(":")
+    lead = dbm.get_lead(int(lid))
+    if not lead or lead["user_id"] != cb.from_user.id or st not in ("won", "closed"):
+        await cb.answer("Topilmadi", show_alert=True)
+        return
+    dbm.update_lead(lead["id"], status=st)
+    await safe_edit(cb.message, (cb.message.text or "") + ("\n\n✅ Kelishildi deb belgilandi" if st == "won"
+                                                         else "\n\n🗄 Yopildi"))
+    await cb.answer()
+
+
 # ====================================================================== SUHBAT (AI + BAZA)
 
 @dp.message(F.text)
 async def on_text(m: Message):
+    step = UB_STATE.get(m.from_user.id)
+    if step:  # userbot ulash jarayoni: kod/parol AI ga yoki tarixga tushmaydi
+        await handle_userbot_login(m, step)
+        return
     await m.bot.send_chat_action(m.chat.id, "typing")
     ctx = None
     try:
@@ -527,6 +766,11 @@ async def on_text(m: Message):
         logging.exception("Suhbat xatosi")
         answer = "Xatolik yuz berdi. Birozdan keyin qayta urinib ko'ring."
     await send_long(m, answer)
+    if ctx and ctx.login:
+        denied = _ub_denied(m.from_user.id)
+        await (m.answer(denied) if denied else start_userbot_login(m, m.from_user.id))
+    if ctx and ctx.picker:
+        await show_group_picker(m, m.from_user.id, 0, refresh=True)
     if ctx and ctx.tables:
         await send_tables(m.chat.id, m.from_user.id, tuple(sorted(ctx.tables)))
 
@@ -537,6 +781,8 @@ async def main():
     if not config.BOT_TOKEN or not config.ANTHROPIC_API_KEY:
         raise SystemExit(".env faylida BOT_TOKEN va ANTHROPIC_API_KEY to'ldirilmagan.")
     dbm.init_db()
+    userbot.BOT = bot
+    await userbot.start_all()  # saqlangan userbot sessiyalarini qayta ulaydi
     task = asyncio.create_task(reminders.reminder_loop(bot))  # noqa: F841 (havola saqlanadi)
     logging.info("Bot ishga tushdi")
     await dp.start_polling(bot)

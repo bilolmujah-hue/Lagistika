@@ -1,4 +1,5 @@
 """Ma'lumotlar bazasi (SQLite). Har bir foydalanuvchi faqat o'z ma'lumotini ko'radi (user_id bo'yicha)."""
+import json
 import re
 import sqlite3
 from contextlib import contextmanager
@@ -36,6 +37,29 @@ CREATE TABLE IF NOT EXISTS messages(
     role TEXT NOT NULL, content TEXT NOT NULL, created TEXT);
 
 CREATE TABLE IF NOT EXISTS sent(key TEXT PRIMARY KEY, sent_at TEXT);
+
+CREATE TABLE IF NOT EXISTS ub_sessions(
+    user_id INTEGER PRIMARY KEY, phone TEXT, session TEXT, created TEXT);
+
+CREATE TABLE IF NOT EXISTS ub_groups(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+    title TEXT, UNIQUE(user_id, chat_id));
+
+CREATE TABLE IF NOT EXISTS cargo_requests(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, origin TEXT, destination TEXT,
+    note TEXT, hours INTEGER, status TEXT DEFAULT 'searching', scanned INTEGER DEFAULT 0,
+    found INTEGER DEFAULT 0, created TEXT);
+
+CREATE TABLE IF NOT EXISTS leads(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, request_id INTEGER,
+    sender_id INTEGER NOT NULL, access_hash INTEGER, username TEXT, name TEXT, phone TEXT,
+    origin TEXT, destination TEXT, cargo TEXT, ad_text TEXT, ad_link TEXT,
+    status TEXT DEFAULT 'new', info TEXT, summary TEXT, contacted_at TEXT, created TEXT, updated TEXT);
+CREATE INDEX IF NOT EXISTS idx_leads_sender ON leads(user_id, sender_id);
+
+CREATE TABLE IF NOT EXISTS lead_msgs(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, lead_id INTEGER NOT NULL, role TEXT NOT NULL,
+    content TEXT NOT NULL, created TEXT);
 """
 
 STATUS_EMOJI = {
@@ -572,3 +596,172 @@ def was_sent(key) -> bool:
 def mark_sent(key):
     with db() as c:
         c.execute("INSERT OR IGNORE INTO sent(key, sent_at) VALUES(?,?)", (key, now_iso()))
+
+
+# ------------------------------------------------------------------ USERBOT SESSIYASI VA GURUHLAR
+
+def ub_save_session(uid, phone, session):
+    with db() as c:
+        c.execute("INSERT OR REPLACE INTO ub_sessions(user_id, phone, session, created) VALUES(?,?,?,?)",
+                  (uid, phone, session, now_iso()))
+
+
+def ub_all_sessions():
+    with db() as c:
+        return [dict(r) for r in c.execute("SELECT * FROM ub_sessions")]
+
+
+def ub_delete_session(uid):
+    with db() as c:
+        c.execute("DELETE FROM ub_sessions WHERE user_id=?", (uid,))
+
+
+def ub_set_group(uid, chat_id, title, on):
+    with db() as c:
+        if on:
+            c.execute("INSERT OR REPLACE INTO ub_groups(user_id, chat_id, title) VALUES(?,?,?)",
+                      (uid, chat_id, title))
+        else:
+            c.execute("DELETE FROM ub_groups WHERE user_id=? AND chat_id=?", (uid, chat_id))
+
+
+def ub_active_groups(uid):
+    with db() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM ub_groups WHERE user_id=? ORDER BY title", (uid,))]
+
+
+# ------------------------------------------------------------------ YUK SO'ROVLARI VA YUK EGALARI (LEAD)
+
+def create_request(uid, origin, destination, note, hours):
+    with db() as c:
+        cur = c.execute(
+            "INSERT INTO cargo_requests(user_id, origin, destination, note, hours, created) VALUES(?,?,?,?,?,?)",
+            (uid, origin, destination, note, hours, now_iso()))
+        return cur.lastrowid
+
+
+def get_request(uid, rid):
+    with db() as c:
+        r = c.execute("SELECT * FROM cargo_requests WHERE id=? AND user_id=?", (rid, uid)).fetchone()
+        return dict(r) if r else None
+
+
+def update_request(rid, **fields):
+    allowed = {"status", "scanned", "found"}
+    items = [(k, v) for k, v in fields.items() if k in allowed]
+    if not items:
+        return
+    with db() as c:
+        c.execute(f"UPDATE cargo_requests SET {', '.join(k + '=?' for k, _ in items)} WHERE id=?",
+                  [v for _, v in items] + [rid])
+
+
+def list_requests(uid, limit=5):
+    with db() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM cargo_requests WHERE user_id=? ORDER BY id DESC LIMIT ?", (uid, limit))]
+
+
+def add_lead(uid, rid, m: dict, parsed: dict):
+    """Topilgan yuk egasini 'new' holatida saqlaydi. Shu so'rovda allaqachon bo'lsa - None."""
+    with db() as c:
+        if c.execute("SELECT 1 FROM leads WHERE user_id=? AND request_id=? AND sender_id=?",
+                     (uid, rid, m["sender_id"])).fetchone():
+            return None
+        cur = c.execute(
+            """INSERT INTO leads(user_id, request_id, sender_id, access_hash, username, name, phone,
+               origin, destination, cargo, ad_text, ad_link, status, created, updated)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'new',?,?)""",
+            (uid, rid, m["sender_id"], m.get("access_hash"), m.get("username"), m.get("name"),
+             parsed.get("phone"), parsed.get("origin"), parsed.get("destination"), parsed.get("cargo"),
+             m["text"][:1500], m.get("link"), now_iso(), now_iso()))
+        return cur.lastrowid
+
+
+def get_lead(lead_id):
+    with db() as c:
+        r = c.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+        return dict(r) if r else None
+
+
+def update_lead(lead_id, **fields):
+    allowed = {"status", "phone", "summary", "contacted_at"}
+    items = [(k, v) for k, v in fields.items() if k in allowed]
+    if not items:
+        return
+    with db() as c:
+        c.execute(f"UPDATE leads SET {', '.join(k + '=?' for k, _ in items)}, updated=? WHERE id=?",
+                  [v for _, v in items] + [now_iso(), lead_id])
+
+
+def merge_lead_info(lead_id, info, summary=None):
+    """AI yig'gan ma'lumotlarni (narx, og'irlik...) qo'shadi. Bo'sh qiymatlar eskisini o'chirmaydi."""
+    with db() as c:
+        r = c.execute("SELECT info FROM leads WHERE id=?", (lead_id,)).fetchone()
+        if not r:
+            return
+        cur = json.loads(r["info"] or "{}")
+        for k, v in (info or {}).items():
+            if v not in (None, "", []):
+                cur[k] = v
+        c.execute("UPDATE leads SET info=?, summary=COALESCE(?, summary), updated=? WHERE id=?",
+                  (json.dumps(cur, ensure_ascii=False), summary, now_iso(), lead_id))
+
+
+def next_new_lead(uid, rid):
+    with db() as c:
+        r = c.execute("SELECT * FROM leads WHERE user_id=? AND request_id=? AND status='new' ORDER BY id LIMIT 1",
+                      (uid, rid)).fetchone()
+        return dict(r) if r else None
+
+
+def count_leads(uid, rid, status):
+    with db() as c:
+        return c.execute("SELECT COUNT(*) FROM leads WHERE user_id=? AND request_id=? AND status=?",
+                         (uid, rid, status)).fetchone()[0]
+
+
+def list_leads(uid, rid=None, limit=30):
+    q, args = "SELECT * FROM leads WHERE user_id=?", [uid]
+    if rid:
+        q += " AND request_id=?"
+        args.append(rid)
+    with db() as c:
+        return [dict(r) for r in c.execute(q + " ORDER BY id DESC LIMIT ?", args + [limit])]
+
+
+def active_lead_by_sender(uid, sender_id):
+    """Suhbat ketayotgan (yoki menejerga topshirilgan) yuk egasi. Boshqa lichka xabarlariga tegilmaydi."""
+    with db() as c:
+        r = c.execute(
+            """SELECT * FROM leads WHERE user_id=? AND sender_id=?
+               AND status IN ('contacted','talking','done','manual') ORDER BY id DESC LIMIT 1""",
+            (uid, sender_id)).fetchone()
+        return dict(r) if r else None
+
+
+def recent_sender_ids(uid, days):
+    """Oxirgi `days` kunda allaqachon yozilgan odamlar (qayta bezovta qilmaslik uchun)."""
+    cutoff = (datetime.now(config.TZ) - timedelta(days=days)).isoformat(timespec="seconds")
+    with db() as c:
+        return {r[0] for r in c.execute(
+            "SELECT sender_id FROM leads WHERE user_id=? AND created>=? AND status!='new'", (uid, cutoff))}
+
+
+def dms_today(uid):
+    with db() as c:
+        return c.execute("SELECT COUNT(*) FROM leads WHERE user_id=? AND substr(contacted_at,1,10)=?",
+                         (uid, today().isoformat())).fetchone()[0]
+
+
+def add_lead_msg(lead_id, role, content):
+    with db() as c:
+        c.execute("INSERT INTO lead_msgs(lead_id, role, content, created) VALUES(?,?,?,?)",
+                  (lead_id, role, content, now_iso()))
+
+
+def lead_msgs(lead_id):
+    with db() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT role, content, created FROM lead_msgs WHERE lead_id=? ORDER BY id", (lead_id,))]
