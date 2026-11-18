@@ -1,8 +1,11 @@
-"""Userbot: shaxsiy Telegram akkauntni (Telethon) botga ulash.
+"""Telegram userbot akkauntlari (Telethon). Uch xil akkaunt bor:
 
-- Ulash: telefon -> kod -> (2 bosqichli parol). Hammasi bot.py dagi suhbat orqali, AI (Claude) ga yuborilmaydi.
-- Sessiya bazada saqlanadi (SESSION_KEY berilsa shifrlangan).
-- Guruhlardan xabar o'qish, lichkaga yozish, kelgan lichka xabarlarini cargo.py ga uzatish.
+  pool - admin qo'shadigan "yuk qidirish" akkauntlari (masalan 10 ta). Guruhlardan e'lon o'qiydi va
+         barcha foydalanuvchilar nomidan yuk egalari bilan lichkada AI orqali gaplashadi.
+  pay  - to'lov akkaunti. @CardXabarBot shu akkauntga kartaga tushgan pullarni xabar qiladi.
+  user - foydalanuvchining shaxsiy akkaunti ("Avto xabar" uchun guruhlarga e'lon yuboradi).
+
+Sessiyalar bazada (SESSION_KEY bo'lsa shifrlangan) saqlanadi.
 """
 import asyncio
 import logging
@@ -12,34 +15,42 @@ from telethon import TelegramClient, errors, events, types
 from telethon.sessions import StringSession
 
 import config
+import core
 import database as dbm
 
-BOT = None            # aiogram Bot (bot.py o'rnatadi) - adminga xabar yuborish uchun
-CLIENTS: dict = {}    # admin_id -> TelegramClient
-ME: dict = {}         # admin_id -> userbot akkauntining o'z ID si
-_LOGIN: dict = {}     # ulanish jarayonidagi vaqtinchalik holat
-GROUP_CACHE: dict = {}
-LAST_SEND: dict = {}  # (admin_id, odam_id) -> oxirgi yuborilgan vaqt (o'zimiz yozganni "qo'lda yozdi" deb adashmaslik uchun)
+CLIENTS: dict = {}       # account_id -> TelegramClient
+ME: dict = {}            # account_id -> akkauntning o'z Telegram ID si
+_LOGIN: dict = {}        # ulanish jarayoni: kim ulayapti (bot user_id) -> {...}
+GROUP_CACHE: dict = {}   # account_id -> [{"chat_id","title"}]
+LAST_SEND: dict = {}     # (account_id, peer_id) -> vaqt (o'zimiz yozganini "qo'lda" deb adashmaslik uchun)
+_ACC_LOCKS: dict = {}    # account_id -> Lock (bir akkauntdan yangi odamlarga navbat bilan yozish)
 
 
-# ====================================================================== SESSIYANI SAQLASH
-
-def _fernet():
-    from cryptography.fernet import Fernet
-    return Fernet(config.SESSION_KEY.encode())
-
-
-def _enc(s: str) -> str:
-    return "enc:" + _fernet().encrypt(s.encode()).decode() if config.SESSION_KEY else s
-
-
-def _dec(s: str) -> str:
-    return _fernet().decrypt(s[4:].encode()).decode() if s.startswith("enc:") else s
-
-
-def is_connected(uid: int) -> bool:
-    c = CLIENTS.get(uid)
+def is_connected(aid) -> bool:
+    c = CLIENTS.get(aid)
     return bool(c and c.is_connected())
+
+
+def get(aid):
+    return CLIENTS.get(aid)
+
+
+def acc_lock(aid) -> asyncio.Lock:
+    return _ACC_LOCKS.setdefault(aid, asyncio.Lock())
+
+
+def connected_pool() -> list:
+    return [a for a in dbm.acc_list("pool", active_only=True) if is_connected(a["id"])]
+
+
+def pay_client():
+    a = dbm.pay_account()
+    return (a, CLIENTS.get(a["id"])) if a and is_connected(a["id"]) else (a, None)
+
+
+def user_client(uid):
+    a = dbm.user_account(uid)
+    return (a, CLIENTS.get(a["id"])) if a and is_connected(a["id"]) else (a, None)
 
 
 # ====================================================================== ULANISH (LOGIN)
@@ -54,11 +65,12 @@ async def login_cancel(uid: int):
 
 
 async def login_start(uid: int, phone: str):
-    """1-qadam: Telegram shu raqamga kod yuboradi (akkauntning o'zidagi Telegram ilovasiga)."""
+    """1-qadam: Telegram shu raqamga kod yuboradi."""
     if not config.TG_API_ID or not config.TG_API_HASH:
-        raise RuntimeError("TG_API_ID va TG_API_HASH .env faylida to'ldirilmagan (my.telegram.org dan oling)")
+        raise RuntimeError("TG_API_ID va TG_API_HASH sozlanmagan (my.telegram.org dan oling)")
     await login_cancel(uid)
-    c = TelegramClient(StringSession(), config.TG_API_ID, config.TG_API_HASH)
+    c = TelegramClient(StringSession(), config.TG_API_ID, config.TG_API_HASH,
+                       device_model="Logistika Bot", system_version="1.0", app_version="1.0")
     await c.connect()
     try:
         sent = await c.send_code_request(phone)
@@ -69,75 +81,124 @@ async def login_start(uid: int, phone: str):
 
 
 async def login_code(uid: int, code: str) -> str:
-    """2-qadam. 'ok' yoki 'password' (2 bosqichli parol kerak) qaytaradi."""
+    """2-qadam. 'ok' yoki 'password' qaytaradi."""
     st = _LOGIN[uid]
     try:
         await st["client"].sign_in(phone=st["phone"], code=code, phone_code_hash=st["hash"])
     except errors.SessionPasswordNeededError:
         return "password"
-    await _finish_login(uid, st)
     return "ok"
 
 
 async def login_password(uid: int, password: str):
-    """3-qadam (kerak bo'lsa): 2 bosqichli tekshiruv paroli."""
     st = _LOGIN[uid]
     await st["client"].sign_in(password=password)
-    await _finish_login(uid, st)
 
 
-async def _finish_login(uid: int, st: dict):
+async def login_finish(uid: int, kind: str) -> int:
+    """Ulanishni yakunlaydi, akkauntni bazaga yozadi va ishga tushiradi. account_id qaytaradi."""
+    st = _LOGIN.pop(uid)
     c = st["client"]
-    dbm.ub_save_session(uid, st["phone"], _enc(c.session.save()))
-    _LOGIN.pop(uid, None)
-    await _activate(uid, c)
-    logging.info("Userbot ulandi (admin %s)", uid)
+    me = await c.get_me()
+    # Shu Telegram akkaunt allaqachon boshqa joyda ulangan bo'lsa - eskisini olib tashlaymiz
+    for a in dbm.acc_list():
+        if a["tg_id"] == me.id and a["kind"] == kind:
+            await remove(a["id"], logout=False)
+    if kind in ("user", "pay"):
+        for a in (dbm.acc_list("user", uid) if kind == "user" else dbm.acc_list("pay")):
+            await remove(a["id"], logout=False)
+    name = " ".join(x for x in (me.first_name, me.last_name) if x) or str(me.id)
+    aid = dbm.acc_add(kind, uid, st["phone"], core.enc(c.session.save()), me.id, me.username, name)
+    await _activate(aid, kind, c)
+    logging.info("Akkaunt ulandi: #%s %s (%s)", aid, kind, name)
+    return aid
 
 
-async def _activate(uid: int, c: TelegramClient):
-    old = CLIENTS.get(uid)
+async def _activate(aid: int, kind: str, c: TelegramClient):
+    old = CLIENTS.get(aid)
     if old and old is not c:
         try:
             await old.disconnect()
         except Exception:
             pass
-    CLIENTS[uid] = c
-    ME[uid] = (await c.get_me()).id
-    _attach(uid, c)
-    asyncio.create_task(_warm(uid))
+    CLIENTS[aid] = c
+    try:
+        ME[aid] = (await c.get_me()).id
+    except Exception:
+        pass
+    _attach(aid, kind, c)
+    dbm.acc_update(aid, status="ok")
+    asyncio.create_task(_warm(aid))
 
 
 async def start_all():
-    """Bot ishga tushganda saqlangan sessiyalarni qayta ulaydi."""
-    for row in dbm.ub_all_sessions():
-        uid = row["user_id"]
-        try:
-            c = TelegramClient(StringSession(_dec(row["session"])), config.TG_API_ID, config.TG_API_HASH)
-            await c.connect()
-            if not await c.is_user_authorized():
-                dbm.ub_delete_session(uid)
-                await c.disconnect()
-                if BOT:
-                    await BOT.send_message(uid, "⚠️ Userbot sessiyasi tugagan. Qaytadan ulang: «🤖 Yuk qidirish» tugmasi.")
-                continue
-            await _activate(uid, c)
-        except Exception:
-            logging.exception("Userbotni ulab bo'lmadi (admin %s)", uid)
+    """Bot ishga tushganda saqlangan barcha akkauntlarni qayta ulaydi."""
+    if not config.TG_API_ID or not config.TG_API_HASH:
+        logging.warning("TG_API_ID/TG_API_HASH yo'q - userbotlar ishga tushirilmadi")
+        return
+    for row in dbm.acc_list():
+        if not row["active"]:
+            continue
+        await connect_row(row)
 
 
-async def disconnect(uid: int):
-    """Userbotni uzadi va Telegram'dagi sessiyani o'chiradi (log out)."""
-    c = CLIENTS.pop(uid, None)
+async def connect_row(row) -> bool:
+    aid = row["id"]
+    try:
+        c = TelegramClient(StringSession(core.dec(row["session"])), config.TG_API_ID, config.TG_API_HASH,
+                           device_model="Logistika Bot", system_version="1.0", app_version="1.0")
+        await c.connect()
+        if not await c.is_user_authorized():
+            await c.disconnect()
+            dbm.acc_update(aid, status="expired", active=0)
+            msg = f"⚠️ Userbot sessiyasi tugagan: {row['name'] or row['phone']} ({row['kind']}). Qaytadan ulang."
+            if row["kind"] == "user":
+                await core.send(row["owner_id"], "⚠️ «Avto xabar» uchun ulangan akkauntingiz sessiyasi tugadi. "
+                                                 "«📢 Avto xabar» bo'limidan qaytadan ulang.")
+            else:
+                await core.notify_admins(msg)
+            return False
+        await _activate(aid, row["kind"], c)
+        return True
+    except Exception as e:
+        logging.exception("Akkauntni ulab bo'lmadi (#%s)", aid)
+        dbm.acc_update(aid, status=f"xato: {e}"[:200])
+        return False
+
+
+async def remove(aid: int, logout: bool = True):
+    """Akkauntni uzadi, (xohlansa) Telegram'dagi sessiyani o'chiradi va bazadan olib tashlaydi."""
+    c = CLIENTS.pop(aid, None)
     if c:
         try:
-            await c.log_out()
+            if logout:
+                await c.log_out()
+            else:
+                await c.disconnect()
         except Exception:
             try:
                 await c.disconnect()
             except Exception:
                 pass
-    dbm.ub_delete_session(uid)
-    ME.pop(uid, None)
+    ME.pop(aid, None)
+    GROUP_CACHE.pop(aid, None)
+    dbm.acc_delete(aid)
+
+
+async def pause(aid: int):
+    c = CLIENTS.pop(aid, None)
+    if c:
+        try:
+            await c.disconnect()
+        except Exception:
+            pass
+    dbm.acc_update(aid, active=0)
+
+
+async def resume(aid: int) -> bool:
+    dbm.acc_update(aid, active=1)
+    row = dbm.acc_get(aid)
+    return await connect_row(row) if row else False
 
 
 def describe_error(e: Exception) -> str:
@@ -153,64 +214,74 @@ def describe_error(e: Exception) -> str:
         return f"Telegram vaqtincha cheklov qo'ydi. {e.seconds // 60 + 1} daqiqadan keyin urinib ko'ring."
     if isinstance(e, errors.ApiIdInvalidError):
         return "TG_API_ID / TG_API_HASH noto'g'ri."
+    if isinstance(e, KeyError):
+        return "Ulanish jarayoni topilmadi. Boshidan boshlang."
     return f"Xatolik: {e}"
 
 
 # ====================================================================== KELGAN XABARLAR
 
-def _attach(uid: int, c: TelegramClient):
-    @c.on(events.NewMessage(incoming=True))
-    async def _incoming(ev):
-        if not ev.is_private:
-            return
-        try:
-            import cargo  # circular import bo'lmasligi uchun shu yerda
-            await cargo.on_private_message(uid, ev)
-        except Exception:
-            logging.exception("Kelgan lichka xabarini qayta ishlashda xato")
+def _attach(aid: int, kind: str, c: TelegramClient):
+    if kind == "pool":
+        @c.on(events.NewMessage(incoming=True))
+        async def _incoming(ev):
+            if not ev.is_private:
+                return
+            try:
+                import cargo
+                await cargo.on_private_message(aid, ev)
+            except Exception:
+                logging.exception("Kelgan lichka xabarini qayta ishlashda xato")
 
-    @c.on(events.NewMessage(outgoing=True))
-    async def _outgoing(ev):
-        # Admin o'zi (telefonidan) yozsa - AI to'xtaydi
-        if not ev.is_private or time.time() - LAST_SEND.get((uid, ev.chat_id), 0) < 8:
-            return
-        try:
-            import cargo
-            await cargo.on_manual_message(uid, ev.chat_id)
-        except Exception:
-            logging.exception("Qo'lda yozilgan xabarni qayta ishlashda xato")
+        @c.on(events.NewMessage(outgoing=True))
+        async def _outgoing(ev):
+            if not ev.is_private or time.time() - LAST_SEND.get((aid, ev.chat_id), 0) < 8:
+                return
+            try:
+                import cargo
+                await cargo.on_manual_message(aid, ev.chat_id)
+            except Exception:
+                logging.exception("Qo'lda yozilgan xabarni qayta ishlashda xato")
+
+    elif kind == "pay":
+        @c.on(events.NewMessage(incoming=True))
+        async def _card(ev):
+            if not ev.is_private:
+                return
+            try:
+                s = await ev.get_sender()
+                if (getattr(s, "username", "") or "").lower() != config.CARD_BOT:
+                    return
+                import payments
+                await payments.on_card_message(ev.raw_text or "", ev.id, ev.date, aid)
+            except Exception:
+                logging.exception("CardXabar xabarini qayta ishlashda xato")
 
 
 # ====================================================================== GURUHLAR
 
-async def _warm(uid: int):
-    """Qayta ishga tushgandan keyin tanlangan guruhlarni Telethon xotirasiga yuklaydi."""
-    ids = {g["chat_id"] for g in dbm.ub_active_groups(uid)}
-    if not ids:
-        return
+async def _warm(aid: int):
+    """Qayta ishga tushgandan keyin dialoglarni Telethon xotirasiga yuklaydi (guruhga yozish uchun kerak)."""
     try:
-        async for d in CLIENTS[uid].iter_dialogs():
-            ids.discard(d.id)
-            if not ids:
-                break
+        await CLIENTS[aid].get_dialogs(limit=500)
     except Exception:
-        logging.exception("Guruhlarni yuklashda xato")
+        logging.warning("Dialoglarni yuklab bo'lmadi (#%s)", aid, exc_info=True)
 
 
-async def list_groups(uid: int) -> list:
-    """Akkauntdagi barcha guruhlar (kanallar emas, chunki kanalda odamlar yozmaydi)."""
+async def list_groups(aid: int) -> list:
+    """Akkauntdagi barcha guruhlar (kanallar emas)."""
     out = []
-    async for d in CLIENTS[uid].iter_dialogs():
+    async for d in CLIENTS[aid].iter_dialogs():
         if d.is_group:
             out.append({"chat_id": d.id, "title": d.name or str(d.id)})
-    GROUP_CACHE[uid] = out
+    GROUP_CACHE[aid] = out
     return out
 
 
-async def fetch_messages(uid: int, chat_id: int, since, limit: int = 5000) -> list:
-    """Guruhdan `since` (UTC datetime) dan keyingi xabarlar. Faqat oddiy foydalanuvchilar yozganlari."""
+async def fetch_messages(aid: int, chat_id: int, since, limit: int = 3000) -> list:
+    """Guruhdan `since` (UTC) dan keyingi oddiy foydalanuvchilar yozgan xabarlar."""
     out = []
-    async for m in CLIENTS[uid].iter_messages(chat_id, limit=limit, wait_time=1):
+    async for m in CLIENTS[aid].iter_messages(chat_id, limit=limit, wait_time=1):
         if m.date < since:
             break
         text = (m.raw_text or "").strip()
@@ -225,22 +296,27 @@ async def fetch_messages(uid: int, chat_id: int, since, limit: int = 5000) -> li
             "msg_id": m.id, "text": text, "date": m.date, "sender_id": s.id,
             "access_hash": s.access_hash, "username": s.username,
             "name": " ".join(x for x in (s.first_name, s.last_name) if x) or "Noma'lum",
-            "link": link,
+            "link": link, "chat_title": getattr(chat, "title", "") or "",
         })
     return out
 
 
 # ====================================================================== LICHKAGA YOZISH
 
-async def send_dm(uid: int, user_id: int, access_hash, text: str):
-    """Odamga lichkada yozadi ("yozmoqda..." ko'rsatib, odamdek). Telethon xatolari tashqarida ushlanadi."""
-    c = CLIENTS[uid]
-    peer = types.InputPeerUser(user_id, access_hash or 0) if access_hash else user_id
-    LAST_SEND[(uid, user_id)] = time.time()
+async def send_dm(aid: int, user_id: int, access_hash, text: str, username=None):
+    """Odamga lichkada yozadi ("yozmoqda..." ko'rsatib). Telethon xatolari chaqiruvchida ushlanadi."""
+    c = CLIENTS[aid]
+    if access_hash:
+        peer = types.InputPeerUser(user_id, access_hash)
+    elif username:
+        peer = await c.get_input_entity(username)
+    else:
+        peer = user_id
+    LAST_SEND[(aid, user_id)] = time.time()
     try:
         async with c.action(peer, "typing"):
             await asyncio.sleep(min(7.0, 1.0 + len(text) / 30))
         msg = await c.send_message(peer, text)
     finally:
-        LAST_SEND[(uid, user_id)] = time.time()
+        LAST_SEND[(aid, user_id)] = time.time()
     return msg

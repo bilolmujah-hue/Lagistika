@@ -1,5 +1,5 @@
 """GPS integratsiyasi: Wialon (gpsmonitor.uz) Remote API.
-Token Railway Variables'dagi WIALON_TOKEN dan olinadi.
+Har bir foydalanuvchining o'z tokeni (bazada shifrlangan) - admin GPS so'rovini ko'rib kiritadi.
 
 Imkoniyatlar: hozirgi joylashuv, tezlik, manzil, kunlik/oylik yurgan masofa (km),
 yurish vaqti, to'xtashlar, butun park hisoboti."""
@@ -15,17 +15,15 @@ import httpx
 
 import config
 
-_sid = None
-_lock = asyncio.Lock()
-_client = httpx.AsyncClient(timeout=60)
-_units_cache = {"t": 0.0, "data": []}
-
 STALE_HOURS = 6        # shuncha soat signal kelmasa - "aloqa yo'q"
 UNITS_CACHE_SEC = 20   # mashinalar ro'yxatini shuncha soniya keshda saqlaymiz
 MOVE_KMH = 3           # shundan past tezlik = to'xtagan (GPS shovqini)
 MAX_JUMP_KMH = 180     # ikki nuqta orasida bundan tez "ko'chish" - GPS xatosi, hisobga olinmaydi
 MIN_STOP_MIN = 15      # shundan qisqa to'xtash ko'rsatilmaydi
 MAX_DAYS = 31
+
+_http = httpx.AsyncClient(timeout=60)
+_CLIENTS: dict = {}
 
 
 def norm(s) -> str:
@@ -35,40 +33,88 @@ def norm(s) -> str:
 
 # ====================================================================== WIALON API
 
-async def _call(svc: str, params: dict, retry: bool = True):
-    global _sid
-    if not config.WIALON_TOKEN:
-        raise RuntimeError("WIALON_TOKEN sozlanmagan")
-    data = {"svc": svc, "params": json.dumps(params)}
-    if svc != "token/login":
-        await _ensure_sid()
-        data["sid"] = _sid
-    r = (await _client.post(config.WIALON_URL, data=data)).json()
-    if isinstance(r, dict) and r.get("error"):
-        if r["error"] == 1 and retry and svc != "token/login":  # sessiya eskirgan
-            _sid = None
-            return await _call(svc, params, retry=False)
-        raise RuntimeError(f"Wialon xatosi: {r['error']}")
-    return r
+def ajax_url(server: str) -> str:
+    """'1.gpsmonitor.uz' / 'https://1.gpsmonitor.uz' -> 'https://1.gpsmonitor.uz/wialon/ajax.html'"""
+    s = (server or "").strip().rstrip("/")
+    if not s:
+        return config.WIALON_URL
+    if not s.startswith("http"):
+        s = "https://" + s
+    if "ajax.html" in s:
+        return s
+    return s + "/wialon/ajax.html"
 
 
-async def _ensure_sid():
-    global _sid
-    if _sid:
-        return
-    async with _lock:
-        if _sid:
+class Wialon:
+    """Bitta foydalanuvchining Wialon sessiyasi (har bir token uchun alohida)."""
+
+    def __init__(self, url: str, token: str):
+        self.url, self.token = url, token
+        self.sid = None
+        self.lock = asyncio.Lock()
+        self.cache = {"t": 0.0, "data": []}
+
+    async def call(self, svc: str, params: dict, retry: bool = True):
+        data = {"svc": svc, "params": json.dumps(params)}
+        if svc != "token/login":
+            await self.ensure()
+            data["sid"] = self.sid
+        r = (await _http.post(self.url, data=data)).json()
+        if isinstance(r, dict) and r.get("error"):
+            if r["error"] == 1 and retry and svc != "token/login":  # sessiya eskirgan
+                self.sid = None
+                return await self.call(svc, params, retry=False)
+            raise RuntimeError(f"Wialon xatosi: {r['error']}")
+        return r
+
+    async def ensure(self):
+        if self.sid:
             return
-        r = await _call("token/login", {"token": config.WIALON_TOKEN})
-        _sid = r["eid"]
-        logging.info("Wialon'ga ulandi")
+        async with self.lock:
+            if self.sid:
+                return
+            r = await self.call("token/login", {"token": self.token})
+            self.sid = r["eid"]
 
 
-async def get_units() -> list:
+def get_client(url: str, token: str) -> Wialon:
+    key = (url, token)
+    w = _CLIENTS.get(key)
+    if not w:
+        w = _CLIENTS[key] = Wialon(url, token)
+    return w
+
+
+def client_for_user(u):
+    """Foydalanuvchining GPS ulanishi. Haydovchi uchun - menejerining GPS i. Yo'q bo'lsa None."""
+    import core
+    import database as dbm
+    if not u:
+        return None
+    if u.get("role") == "driver" and u.get("manager_id"):
+        u = dbm.get_user(u["manager_id"]) or {}
+    tok = core.dec(u.get("gps_token")) if u.get("gps_token") else None
+    if tok:
+        return get_client(ajax_url(u.get("gps_url") or config.GPS_DEFAULT_SERVER), tok)
+    if config.WIALON_TOKEN and u.get("user_id") in config.SUPER_ADMINS:
+        return get_client(config.WIALON_URL, config.WIALON_TOKEN)
+    return None
+
+
+async def check_token(server: str, token: str):
+    """Tokenni tekshiradi. -> (True, akkaunt_nomi) | (False, xato_matni)"""
+    try:
+        r = await Wialon(ajax_url(server), token).call("token/login", {"token": token})
+        return True, ((r.get("user") or {}).get("nm") or "OK")
+    except Exception as e:
+        return False, str(e)
+
+
+async def get_units(w: Wialon) -> list:
     """Barcha mashinalar: id, nom, tezlik, oxirgi signal vaqti, koordinatalar, qurilma parametrlari."""
-    if time.time() - _units_cache["t"] < UNITS_CACHE_SEC and _units_cache["data"]:
-        return _units_cache["data"]
-    r = await _call("core/search_items", {
+    if time.time() - w.cache["t"] < UNITS_CACHE_SEC and w.cache["data"]:
+        return w.cache["data"]
+    r = await w.call("core/search_items", {
         "spec": {"itemsType": "avl_unit", "propName": "sys_name",
                  "propValueMask": "*", "sortType": "sys_name"},
         "force": 1, "flags": 1 | 0x20 | 0x400, "from": 0, "to": 0})
@@ -88,7 +134,7 @@ async def get_units() -> list:
             "age_h": (now - ts) / 3600 if ts else None,
             "params": dict(list(params.items())[:30]),
         })
-    _units_cache.update(t=time.time(), data=out)
+    w.cache.update(t=time.time(), data=out)
     return out
 
 
@@ -157,7 +203,7 @@ async def reverse_geocode(lat, lon):
     if lat is None or lon is None:
         return None
     try:
-        r = await _client.get(
+        r = await _http.get(
             "https://nominatim.openstreetmap.org/reverse",
             params={"format": "jsonv2", "lat": lat, "lon": lon, "zoom": 16,
                     "accept-language": "ru,uz,en"},
@@ -211,12 +257,12 @@ def _hm(ts) -> str:
     return datetime.fromtimestamp(ts, config.TZ).strftime("%H:%M")
 
 
-async def load_points(unit_id, t1: int, t2: int) -> list:
+async def load_points(w: Wialon, unit_id, t1: int, t2: int) -> list:
     """Vaqt oralig'idagi GPS nuqtalari: [(vaqt, lat, lon, tezlik), ...]."""
     if t2 <= t1:
         return []
     try:
-        r = await _call("messages/load_interval", {
+        r = await w.call("messages/load_interval", {
             "itemId": unit_id, "timeFrom": t1, "timeTo": t2,
             "flags": 0, "flagsMask": 65280, "loadCount": 4294967295})
         pts = []
@@ -228,7 +274,7 @@ async def load_points(unit_id, t1: int, t2: int) -> list:
         return pts
     finally:
         try:  # Wialon serverida xotirani bo'shatish
-            await _call("messages/unload", {}, retry=False)
+            await w.call("messages/unload", {}, retry=False)
         except Exception:
             pass
 
@@ -289,12 +335,12 @@ def _day_dict(d: date, a: dict, detail: bool) -> dict:
     return out
 
 
-async def day_report(unit: dict, d: date, detail: bool = False) -> dict:
+async def day_report(w: Wialon, unit: dict, d: date, detail: bool = False) -> dict:
     t1, t2 = day_bounds(d)
-    return _day_dict(d, analyze(await load_points(unit["id"], t1, t2)), detail)
+    return _day_dict(d, analyze(await load_points(w, unit["id"], t1, t2)), detail)
 
 
-async def period_report(unit: dict, d1: date, d2: date, detail: bool = False) -> dict:
+async def period_report(w: Wialon, unit: dict, d1: date, d2: date, detail: bool = False) -> dict:
     """d1..d2 oralig'ida har kun uchun hisobot (eng ko'pi MAX_DAYS kun)."""
     if d2 < d1:
         d1, d2 = d2, d1
@@ -305,21 +351,21 @@ async def period_report(unit: dict, d1: date, d2: date, detail: bool = False) ->
 
     async def one(d):
         async with sem:
-            return await day_report(unit, d, detail=detail and len(days) == 1)
+            return await day_report(w, unit, d, detail=detail and len(days) == 1)
 
     res = await asyncio.gather(*(one(d) for d in days))
     return {"fura": unit["name"], "kunlar": res,
             "jami_km": round(sum(r["masofa_km"] for r in res), 1)}
 
 
-async def fleet_mileage(units: list, d: date) -> dict:
+async def fleet_mileage(w: Wialon, units: list, d: date) -> dict:
     """Butun park: shu kuni har bir mashina necha km yurgan."""
     sem = asyncio.Semaphore(4)
 
     async def one(u):
         async with sem:
             try:
-                r = await day_report(u, d)
+                r = await day_report(w, u, d)
                 return {"fura": u["name"], "km": r["masofa_km"], "yurgan_vaqti": r.get("yurgan_vaqti")}
             except Exception as e:  # bitta mashina xatosi hammasini buzmasin
                 logging.warning("Km hisoblab bo'lmadi: %s (%s)", u["name"], e)
