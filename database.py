@@ -105,6 +105,10 @@ CREATE TABLE IF NOT EXISTS ap_groups(
     title TEXT, active INTEGER DEFAULT 1, note TEXT, UNIQUE(campaign_id, chat_id));
 CREATE TABLE IF NOT EXISTS ad_cache(
     key TEXT PRIMARY KEY, kind TEXT, origin TEXT, destination TEXT, cargo TEXT, phone TEXT, created TEXT);
+CREATE TABLE IF NOT EXISTS ai_providers(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, url TEXT, api_key TEXT, model TEXT,
+    active INTEGER DEFAULT 1, priority INTEGER DEFAULT 100, calls INTEGER DEFAULT 0, fails INTEGER DEFAULT 0,
+    last_error TEXT, cooldown_until TEXT, created TEXT);
 CREATE TABLE IF NOT EXISTS ap_bad_chats(chat_id INTEGER PRIMARY KEY, title TEXT, reason TEXT, created TEXT);
 CREATE TABLE IF NOT EXISTS place_stems(place TEXT PRIMARY KEY, stems TEXT, created TEXT);
 
@@ -1572,3 +1576,48 @@ def ap_bad_add(chat_id, title, reason):
 def ap_bad_ids() -> dict:
     with db() as c:
         return {r["chat_id"]: r["reason"] for r in c.execute("SELECT chat_id, reason FROM ap_bad_chats")}
+
+
+# ====================================================================== AI PROVAYDERLAR (admin paneldan qo'shiladi)
+
+AI_FIELDS = {"name", "url", "api_key", "model", "active", "priority", "calls", "fails", "last_error", "cooldown_until"}
+
+
+def ai_add(name, url, api_key, model):
+    with db() as c:
+        pr = (c.execute("SELECT COALESCE(MAX(priority),0) FROM ai_providers").fetchone()[0] or 0) + 10
+        return c.execute("INSERT INTO ai_providers(name, url, api_key, model, active, priority, created) "
+                         "VALUES(?,?,?,?,1,?,?)", (name, url, api_key, model, pr, now_iso())).lastrowid
+
+
+def ai_list(active_only=False):
+    q = "SELECT * FROM ai_providers" + (" WHERE active=1" if active_only else "") + " ORDER BY priority, id"
+    with db() as c:
+        return [dict(r) for r in c.execute(q)]
+
+
+def ai_get(pid):
+    with db() as c:
+        r = c.execute("SELECT * FROM ai_providers WHERE id=?", (pid,)).fetchone()
+        return dict(r) if r else None
+
+
+def ai_update(pid, **fields):
+    items = [(k, v) for k, v in fields.items() if k in AI_FIELDS]
+    if items:
+        with db() as c:
+            c.execute(f"UPDATE ai_providers SET {', '.join(k + '=?' for k, _ in items)} WHERE id=?",
+                      [v for _, v in items] + [pid])
+
+
+def ai_bump(pid, ok, err=None):
+    with db() as c:
+        if ok:
+            c.execute("UPDATE ai_providers SET calls=calls+1, last_error=NULL WHERE id=?", (pid,))
+        else:
+            c.execute("UPDATE ai_providers SET fails=fails+1, last_error=? WHERE id=?", ((err or "")[:300], pid))
+
+
+def ai_delete(pid):
+    with db() as c:
+        c.execute("DELETE FROM ai_providers WHERE id=?", (pid,))

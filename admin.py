@@ -81,7 +81,8 @@ def home_view(uid):
          B(text="⚙️ Avto to'lov", callback_data="ad:apay")],
         [B(text=f"🤖 Userbotlar ({on}/{len(pool)})", callback_data="ad:pool"),
          B(text=f"📍 GPS so'rovlar{f' ({gpsq})' if gpsq else ''}", callback_data="ad:gps")],
-        [B(text="⭐ VIP", callback_data="ad:vip"), B(text="👮 Adminlar", callback_data="ad:admins")],
+        [B(text="🧠 AI kalitlar", callback_data="ad:ai"), B(text="⭐ VIP", callback_data="ad:vip")],
+        [B(text="👮 Adminlar", callback_data="ad:admins")],
         [B(text="📣 Xabar yuborish", callback_data="ad:bc"), B(text="📥 Excel", callback_data="ad:xls")],
         [B(text="🔎 Qidirish", callback_data="ad:search"), B(text="🔄 Yangilash", callback_data="ad:home")],
     ]
@@ -109,9 +110,9 @@ def stats_text():
             f"🚛 Furalar: {s['vehicles']} · 👤 Haydovchilar (baza): {s['drivers_db']} · 📄 Hujjatlar: {s['docs']}\n"
             f"📍 GPS ulanganlar: {s['gps_users']}\n🔎 Qidiruvlar: {s['searches']} · 💬 Yozilgan e'lon egalari: {s['leads']}\n"
             f"📢 Faol avto xabarlar: {s['campaigns']}\n\n"
-            f"🤖 AI chaqiruvlari (bot ishga tushgandan beri): Groq {llm.STATS['groq']} · Gemini {llm.STATS['gemini']} · "
-            f"Claude {llm.STATS['claude']} · xato {llm.STATS['errors']}\n"
-            f"Arzon AI: {'✅ ' + ', '.join(n for n, on in (('Groq', config.GROQ_API_KEYS), ('Gemini', config.CHEAP_AI_KEY)) if on) if llm.cheap_enabled() else '❌ ulanmagan (hammasi Claude da)'}")
+            f"🤖 AI chaqiruvlari (ishga tushgandan beri): arzon AI {llm.STATS['cheap']} · Claude {llm.STATS['claude']} · "
+            f"xato {llm.STATS['errors']}\n"
+            f"Arzon AI: {'✅ ' + str(len(dbm.ai_list(True))) + ' ta faol' if llm.cheap_enabled() else '❌ ulanmagan (hammasi Claude da)'}")
 
 
 # ====================================================================== FOYDALANUVCHILAR
@@ -368,6 +369,70 @@ async def save_gps_token(admin_id, uid, server, token, rid=None) -> str:
     return f"✅ Token saqlandi ({info}). Foydalanuvchiga xabar yuborildi."
 
 
+# ====================================================================== AI KALITLAR
+
+def ai_view():
+    rows, lines = [], ["🧠 AI KALITLAR (yuk qidiruvi va oddiy ishlar uchun)\n",
+                       "Bot yuqoridan pastga tartibda ishlatadi. Biri limitga yetsa yoki ishlamasa - keyingisiga o'tadi "
+                       "va sizga xabar keladi. Hammasi ishlamasa - Claude (qimmatroq) ishlatiladi.\n"]
+    now = dbm._dt(dbm.now_iso())
+    for p in dbm.ai_list():
+        cd = dbm._dt(p.get("cooldown_until"))
+        if not p["active"]:
+            icon, st = "⏸", "o'chirilgan"
+        elif cd and cd > now:
+            icon, st = "⏳", f"limit, {dbm.fmt_dt(cd, True)[-5:]} gacha"
+        else:
+            icon, st = "🟢", "ishlayapti"
+        lines.append(f"{icon} #{p['id']} {p['name']} · {p['model']}\n    ✅ {p['calls']} · ❌ {p['fails']} · {st}")
+        rows.append([B(text=f"{icon} #{p['id']} {p['name']} · {p['model']}"[:60], callback_data=f"ad:ai:{p['id']}")])
+    env = []
+    if config.GROQ_API_KEYS:
+        env.append(f"Groq ({len(config.GROQ_API_KEYS)} ta kalit)")
+    if config.CHEAP_AI_KEY:
+        env.append("Gemini")
+    if env:
+        lines.append("\nRailway Variables dagi zaxira: " + ", ".join(env))
+    if not dbm.ai_list() and not env:
+        lines.append("Hali AI qo'shilmagan - hozir hammasi Claude da (qimmat). «➕ AI qo'shish» ni bosing.")
+    lines.append(f"\n📊 Ishga tushgandan beri: arzon AI {llm.STATS['cheap']} · Claude {llm.STATS['claude']} · "
+                 f"xato {llm.STATS['errors']}")
+    rows.append([B(text="➕ AI qo'shish", callback_data="ad:aiadd")])
+    rows.append(back())
+    return "\n".join(lines), K(inline_keyboard=rows)
+
+
+def ai_card(pid):
+    p = dbm.ai_get(pid)
+    if not p:
+        return "Topilmadi.", K(inline_keyboard=[back("ad:ai")])
+    key = core.dec(p["api_key"]) or ""
+    text = (f"🧠 AI #{pid}: {p['name']}\n🌐 {p['url']}\n🤖 Model: {p['model']}\n🔑 Kalit: {key[:6]}…{key[-4:]}\n"
+            f"Holat: {'🟢 yoqilgan' if p['active'] else '⏸ o' + chr(39) + 'chirilgan'}\n"
+            f"✅ Muvaffaqiyatli: {p['calls']} · ❌ Xato: {p['fails']}\n"
+            + (f"Oxirgi xato: {p['last_error']}\n" if p.get("last_error") else "")
+            + (f"⏳ Limit: {dbm.fmt_dt(p['cooldown_until'], True)} gacha\n" if p.get("cooldown_until") else ""))
+    rows = [[B(text="🧪 Sinash", callback_data=f"ad:aitest:{pid}"),
+             B(text="⬆️ Birinchi qilish", callback_data=f"ad:aitop:{pid}")],
+            [B(text="⏸ O'chirish" if p["active"] else "▶️ Yoqish", callback_data=f"ad:aitog:{pid}"),
+             B(text="🗑 Butunlay o'chirish", callback_data=f"ad:aidel:{pid}")],
+            back("ad:ai")]
+    return text, K(inline_keyboard=rows)
+
+
+async def ai_finish(m: Message, uid: int, w: dict, model: str):
+    core.WAIT.pop(uid, None)
+    wait = await m.answer(f"🧪 Sinab ko'rilmoqda: {w['name']} · {model} ...")
+    ok, info = await llm.test(w["url"], w["key"], model)
+    if not ok:
+        await core.safe_edit(wait, f"❌ Ishlamadi: {info}\nKalit yoki model nomini tekshirib, qayta qo'shing.",
+                             K(inline_keyboard=[[B(text="➕ Qayta urinish", callback_data="ad:aiadd")], back("ad:ai")]))
+        return
+    pid = dbm.ai_add(w["name"], w["url"], core.enc(w["key"]), model)
+    t, kb = ai_view()
+    await core.safe_edit(wait, f"✅ Qo'shildi va ishlayapti (#{pid}, javob {info}).\n\n" + t, kb)
+
+
 # ====================================================================== VIP / ADMINLAR
 
 def vip_view():
@@ -534,6 +599,28 @@ async def handle_input(m: Message, w: dict):
         dbm.set_setting(key, val)
         t, kb = apay_view()
         await m.answer("✅ Saqlandi.\n\n" + t, reply_markup=kb)
+    elif k == "admin:aiurl":
+        if not text.startswith("http"):
+            await m.answer("To'liq manzil yuboring, masalan: https://api.example.com/v1/chat/completions")
+            return
+        w.update(k="admin:aikey", url=text)
+        await m.answer("🔑 Endi API kalitni yuboring:")
+    elif k == "admin:aikey":
+        if len(text) < 10:
+            await m.answer("Kalit juda qisqa. To'liq yuboring yoki /cancel.")
+            return
+        try:
+            await m.delete()
+        except Exception:
+            pass
+        w.update(k="admin:aimodel", key=text)
+        rows = [[B(text=f"✅ {w['default_model']}", callback_data="ad:aimd")]] if w.get("default_model") else []
+        await m.answer("🤖 Model nomini yuboring" + (" yoki tavsiya etilganini bosing:" if rows else ":") +
+                       ("\n(OpenRouter'da bepul modellar nomi «:free» bilan tugaydi, masalan "
+                        "google/gemma-4-31b-it:free)" if "openrouter" in w["url"] else ""),
+                       reply_markup=K(inline_keyboard=rows) if rows else None)
+    elif k == "admin:aimodel":
+        await ai_finish(m, uid, w, text)
     elif k == "admin:vipadd":
         if not text.lstrip("-").isdigit():
             await m.answer("Telegram ID ni raqamda yuboring (foydalanuvchi /id buyrug'i bilan bilib oladi).")
@@ -730,6 +817,58 @@ async def cb_admin(cb: CallbackQuery):
             await core.send(r["user_id"], "❌ GPS ulash so'rovingiz bajarilmadi. Login/parolni tekshirib, qayta yuboring "
                                           "yoki admin bilan bog'laning.")
         await view(gps_view())
+
+    # ---- AI kalitlar
+    elif act == "ai" and len(p) == 2:
+        await view(ai_view())
+    elif act == "ai":
+        await view(ai_card(int(p[2])))
+    elif act == "aiadd":
+        rows = [[B(text=llm.PRESETS[k][0], callback_data=f"ad:aip:{k}")] for k in llm.PRESETS]
+        rows.append([B(text="🔧 Boshqa (o'z manzili)", callback_data="ad:aip:custom")])
+        rows.append(back("ad:ai"))
+        await core.safe_edit(msg, "➕ Qaysi AI xizmatini qo'shamiz?\n\n"
+                                  "• Groq - tez, bepul limiti bor (console.groq.com)\n"
+                                  "• OpenRouter - ko'p bepul modellar «:free» (openrouter.ai)\n"
+                                  "• Gemini - Google AI Studio (aistudio.google.com)\n"
+                                  "• DeepSeek, OpenAI - pullik, arzon", K(inline_keyboard=rows))
+    elif act == "aip":
+        key = p[2]
+        if key == "custom":
+            core.WAIT[uid] = {"k": "admin:aiurl", "name": "Custom", "default_model": ""}
+            await msg.answer("🌐 OpenAI-mos API manzilini yuboring (…/chat/completions):")
+        else:
+            name, url, model = llm.PRESETS[key]
+            core.WAIT[uid] = {"k": "admin:aikey", "name": name, "url": url, "default_model": model}
+            await msg.answer(f"🔑 {name} API kalitini yuboring (xabaringiz darhol o'chiriladi):")
+    elif act == "aimd":
+        w = core.WAIT.get(uid)
+        if not w or w.get("k") != "admin:aimodel":
+            alert = "Jarayon topilmadi, qaytadan boshlang"
+        else:
+            await ai_finish(msg, uid, w, w["default_model"])
+    elif act == "aitest":
+        pr = dbm.ai_get(int(p[2]))
+        if pr:
+            ok, info = await llm.test(pr["url"], core.dec(pr["api_key"]), pr["model"])
+            if ok:
+                dbm.ai_update(pr["id"], cooldown_until=None, last_error=None)
+            alert = (f"✅ Ishlayapti ({info})" if ok else f"❌ {info}")[:190]
+            await view(ai_card(pr["id"]))
+    elif act == "aitog":
+        pr = dbm.ai_get(int(p[2]))
+        if pr:
+            dbm.ai_update(pr["id"], active=0 if pr["active"] else 1, cooldown_until=None)
+            await view(ai_card(pr["id"]))
+    elif act == "aitop":
+        pr = dbm.ai_get(int(p[2]))
+        if pr:
+            low = min([x["priority"] for x in dbm.ai_list()] + [100])
+            dbm.ai_update(pr["id"], priority=low - 1)
+            await view(ai_view())
+    elif act == "aidel":
+        dbm.ai_delete(int(p[2]))
+        await view(ai_view())
 
     # ---- VIP / adminlar
     elif act == "vip":

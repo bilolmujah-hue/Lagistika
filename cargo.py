@@ -56,6 +56,14 @@ def _norm(s: str) -> str:
     return (s or "").lower().replace("ʻ", "'").replace("’", "'").replace("`", "'").replace("ё", "е")
 
 
+def clean_name(s, limit=32) -> str:
+    """Ismdagi g'alati belgilar (◇◇◇ bo'lib ko'rinadigan) olib tashlanadi."""
+    import unicodedata
+    out = "".join(ch for ch in (s or "") if unicodedata.category(ch)[0] not in ("M", "C") or ch == " ")
+    out = re.sub(r"\s+", " ", out).strip()
+    return (out[:limit] + "…") if len(out) > limit else (out or "Noma'lum")
+
+
 def _company(uid) -> str:
     u = dbm.get_user(uid) or {}
     return (u.get("company") or "").strip() or config.COMPANY_NAME
@@ -65,6 +73,8 @@ def _company(uid) -> str:
 
 def start_search(uid: int, origin: str, destination: str, note: str, hours=None, mode="cargo") -> dict:
     mode = mode if mode in MODE_TITLE else "cargo"
+    origin = re.sub(r"\(.*?\)|\d+[.,]\d+|[,;].*$", "", origin or "").strip(" -")
+    destination = re.sub(r"\(.*?\)|\d+[.,]\d+|[,;].*$", "", destination or "").strip(" -")
     if not origin:
         return {"xato": "Qayerdan ekanini yozing (masalan: Toshkent Moskva)."}
     if not userbot.connected_pool():
@@ -202,68 +212,69 @@ def _search_terms(place: str, stems: list) -> list:
     return terms[:4]
 
 
-async def _collect(aid, terms, since, allowed) -> list:
-    out = []
-    for term in terms:
-        try:
-            msgs = await userbot.search_messages(aid, term, since, limit=200)
-        except Exception as e:
-            logging.warning("Global qidiruv ishlamadi (#%s, %s): %s - guruhlar bo'yicha qidiriladi", aid, term, e)
-            msgs = []
-            for chat_id in list(allowed)[:80]:
-                try:
-                    msgs += await userbot.search_messages(aid, term, since, limit=40, chat=chat_id)
-                except Exception:
-                    continue
-        out += [m for m in msgs if not allowed or m["chat_id"] in allowed]
-    return out
-
-
 async def _run_search(uid: int, rid: int):
+    """Userbotlar a'zo bo'lgan BARCHA guruhlardan qidiradi va eng mos `search_results` (5) ta e'lon
+    topilishi bilan to'xtaydi. Har guruhda Telegram serverining o'z qidiruvi ishlatiladi -
+    faqat joy nomi bor xabarlar keladi, hamma xabarni o'qish shart emas."""
     req = dbm.get_request(uid, rid)
     mode = req.get("mode") or "cargo"
+    want = "cargo" if mode == "cargo" else "truck"
     want_n = max(1, dbm.setting_int("search_results", 5))
     try:
         o_stems = await place_stems(req["origin"])
         d_stems = await place_stems(req["destination"]) if req["destination"] else []
         terms = _search_terms(req["origin"], o_stems)
         since = datetime.now(timezone.utc) - timedelta(hours=req["hours"])
-        accs = userbot.connected_pool()
-        res = await asyncio.gather(*(_collect(a["id"], terms, since, {g["chat_id"] for g in dbm.pool_groups(a["id"])})
-                                     for a in accs))
         own = set(userbot.ME.values())
-        uniq = {}
-        scanned = 0
-        for a, msgs in zip(accs, res):
+        matches, seen_keys, seen_senders = [], set(), set()
+        st = {"parsed": 0, "chats": 0, "scanned": 0}
+
+        async def process(aid, msgs):
+            new = []
             for m in msgs:
-                scanned += 1
+                st["scanned"] += 1
                 if m["sender_id"] in own or not (12 <= len(m["text"]) <= 2500):
                     continue
-                m = dict(m, _aid=a["id"], _key=_ad_key(m["text"]))
-                cur = uniq.get(m["_key"])
-                if cur is None or m["date"] > cur["date"]:
-                    uniq[m["_key"]] = m
-        cands = list(uniq.values())
-        # manzil so'zi bor e'lonlar oldinga, keyin eng yangilari
-        cands.sort(key=lambda m: (not (d_stems and _prefilter(m["text"], d_stems)), -m["date"].timestamp()))
+                k = _ad_key(m["text"])
+                if k in seen_keys:
+                    continue
+                seen_keys.add(k)
+                new.append(dict(m, _aid=aid, _key=k))
+            new.sort(key=lambda m: (not (d_stems and _prefilter(m["text"], d_stems)), -m["date"].timestamp()))
+            for i in range(0, len(new), 25):
+                if len(matches) >= want_n or st["parsed"] >= config.MAX_PARSE_PER_SEARCH:
+                    return
+                batch = new[i:i + 25]
+                st["parsed"] += len(batch)
+                parsed = await parse_ads(batch)
+                for m in batch:
+                    pr = parsed.get(m["_key"])
+                    if (len(matches) < want_n and pr and pr.get("kind") == want and _route_ok(pr, o_stems, d_stems)
+                            and m["sender_id"] not in seen_senders):
+                        seen_senders.add(m["sender_id"])
+                        matches.append((m, pr))
 
-        want = "cargo" if mode == "cargo" else "truck"
-        matches, seen_senders, parsed_n = [], set(), 0
-        for i in range(0, len(cands), 25):
-            if len(seen_senders) >= want_n or parsed_n >= config.MAX_PARSE_PER_SEARCH:
+        for a in userbot.connected_pool():
+            if len(matches) >= want_n:
                 break
-            batch = cands[i:i + 25]
-            parsed_n += len(batch)
-            parsed = await parse_ads(batch)
-            for m in batch:
-                pr = parsed.get(m["_key"])
-                if (pr and pr.get("kind") == want and _route_ok(pr, o_stems, d_stems)
-                        and m["sender_id"] not in seen_senders and len(seen_senders) < want_n):
-                    seen_senders.add(m["sender_id"])
-                    matches.append((m, pr))
-        groups = {m["chat_id"] for m in cands}
-        logging.info("Qidiruv #%s: %s ta xabar topildi, %s ta noyob, %s ta tahlil, %s ta mos", rid, scanned,
-                     len(cands), parsed_n, len(matches))
+            aid = a["id"]
+            # admin paneldan shu userbotga tanlangan guruhlar; tanlanmagan bo'lsa - akkauntdagi barcha guruhlar
+            chats = dbm.pool_groups(aid) or userbot.GROUP_CACHE.get(aid) or await userbot.list_groups(aid)
+            for g in chats:
+                if len(matches) >= want_n:
+                    break
+                msgs = []
+                for term in terms:
+                    try:
+                        msgs += await userbot.search_messages(aid, term, since, limit=60, chat=g["chat_id"])
+                    except Exception as e:
+                        logging.debug("Guruhda qidirib bo'lmadi (%s): %s", g["title"], e)
+                        break
+                st["chats"] += 1
+                if msgs:
+                    await process(aid, msgs)
+        scanned, groups = st["scanned"], st["chats"]
+        logging.info("Qidiruv #%s: %s guruh, %s xabar, %s tahlil, %s mos", rid, groups, scanned, st["parsed"], len(matches))
 
         by_sender = {}
         for m, parsed in matches:
@@ -284,7 +295,7 @@ async def _run_search(uid: int, rid: int):
 
         what = "yuk e'loni" if mode == "cargo" else "bo'sh mashina e'loni"
         head = (f"🔎 Qidiruv tugadi: {req['origin']} → {req['destination'] or 'istalgan manzil'}\n"
-                f"📨 {len(groups)} ta guruhdan eng mos {len(new_leads)} ta {what} topildi.")
+                f"📨 {groups} ta guruh tekshirildi, eng mos {len(new_leads)} ta {what} topildi.")
         if not new_leads:
             await core.send(uid, head + "\n\nHozircha mos e'lon topilmadi. Birozdan keyin qayta qidirib ko'ring "
                                         "yoki boshqa yo'nalish yozing.")
@@ -295,7 +306,7 @@ async def _run_search(uid: int, rid: int):
             ph = f"\n   📞 {parsed['phone']}" if parsed.get("phone") else ""
             tag = " (yaqinda bizdan xabar olgan)" if was_recent else ""
             blocks.append(
-                f"{n}. 👤 {m['name']} ({u}){tag}\n"
+                f"{n}. 👤 {clean_name(m['name'])} ({u}){tag}\n"
                 f"   📍 {parsed.get('origin') or '?'} → {parsed.get('destination') or '?'}"
                 f"{' · ' + parsed['cargo'] if parsed.get('cargo') else ''}{ph}\n"
                 f"   💬 {m['text'][:160].replace(chr(10), ' ')}{'...' if len(m['text']) > 160 else ''}\n"
@@ -663,6 +674,8 @@ def status_text(uid: int) -> str:
     for r in reqs:
         title, scanned, found = r["so'rov"], r["o'qilgan_xabar"], r["topilgan"]
         lines.append(f"\n🔎 {title} (o'qildi: {scanned}, topildi: {found})")
-        for l in r["egalari"]:
-            lines.append(f"  • {l['ism']} - {l['holat']}")
+        for l in r["egalari"][:10]:
+            lines.append(f"  • {clean_name(l['ism'])} - {l['holat']}")
+        if len(r["egalari"]) > 10:
+            lines.append(f"  ... va yana {len(r['egalari']) - 10} ta")
     return "\n".join(lines)

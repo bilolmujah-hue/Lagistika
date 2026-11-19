@@ -245,7 +245,10 @@ MANAGER_TOOLS = [
        "YUK yoki FURA QIDIRISH yuk guruhlaridan. mode='cargo' - foydalanuvchining furasi bor, YUK kerak "
        "('Toshkentdan Moskvaga yuk kerak'); mode='truck' - foydalanuvchining yuki bor, MASHINA kerak "
        "('Andijondan Almatiga fura kerak'). Natijani bot o'zi keyin yuboradi (tool darhol qaytadi).",
-       {"origin": S, "destination": S, "mode": {"type": "string", "enum": ["cargo", "truck"]},
+       {"origin": {"type": "string", "description": "FAQAT joy nomi: shahar, viloyat yoki davlat (masalan 'Pskov'). "
+                                                     "Koordinata, qavs va izoh yozmang."},
+        "destination": {"type": "string", "description": "FAQAT joy nomi"},
+        "mode": {"type": "string", "enum": ["cargo", "truck"]},
         "note": S, "hours": {"type": "integer", "description": "necha soat orqaga (odatda 24)"}}, ["origin"]),
     _t("cargo_status", "Qidiruvlar va e'lon egalari bilan suhbatlar holati."),
     _t("cargo_cancel", "Yuk/fura qidiruvini va e'lon egalariga yozishni DARHOL TO'XTATISH. Foydalanuvchi 'bekor qil', "
@@ -857,6 +860,9 @@ Qoidalar:
    ko'radi va eslatmalar unga ham boradi.
 7. "Toshkentdan Moskvaga yuk kerak" -> cargo_search(mode=cargo); "Andijondan Almatiga fura kerak" -> cargo_search(mode=truck).
    Keyin qisqa "🔎 Qidirilmoqda..." deb yozing - natijani bot o'zi yuboradi. Natijani to'qimang.
+   Agar foydalanuvchi qayerDAN, qayerGA va nima (yuk yoki fura) kerakligini aniq yozmagan bo'lsa (masalan faqat
+   "Toshkent Moskva") - cargo_search ni CHAQIRMANG, bunday so'rang: «Iltimos, to'liqroq yozing: Toshkentdan Moskvaga
+   yuk kerak yoki Toshkentdan Moskvaga fura kerak».
    "Bekor qil", "to'xtat", "qidirmay qo'y" -> cargo_cancel; "gaplashishni ham to'xtat" -> cargo_cancel(stop_chats=true).
 8. Avto xabar haqida so'rasa autopost_status / autopost_control. "To'xtat" -> stop, "yoq" -> start.
 9. Obuna, to'lov haqida - subscription_status / open_payment.

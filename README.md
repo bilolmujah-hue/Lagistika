@@ -16,6 +16,11 @@
 3. **🤖 Userbotlar → ➕ Akkaunt qo'shish** — yuk qidirish uchun 10 tagacha akkaunt. Har biriga yuk guruhlarini tanlang.
    Alohida (shaxsiy bo'lmagan) raqamlar ishlating.
 
+## AI kalitlar (🛠 Admin panel → 🧠 AI kalitlar)
+Yuk qidiruvidagi ommaviy ishlar arzon AI larda bajariladi: Groq, OpenRouter (bepul «:free» modellar), Gemini,
+DeepSeek, OpenAI yoki istalgan OpenAI-mos API. «➕ AI qo'shish» → xizmat → kalit → model; bot darhol sinab ko'radi.
+Kalit limiti tugasa yoki ishlamasa - bot keyingisiga o'tadi va adminga xabar yuboradi. Hammasi ishlamasa - Claude.
+
 ## To'lov qanday aniqlanadi
 Har bir to'lovchiga unikal summa beriladi (masalan **100 347** so'm). @CardXabarBot xabarida «➕ 100 347.00 UZS»
 kelishi bilan obuna avtomatik ochiladi. Chek AI orqali o'qiladi, lekin obuna faqat kartaga **haqiqiy tushum**

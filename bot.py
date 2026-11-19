@@ -7,6 +7,7 @@ kiradi, faqat o'z hujjatlari va furasini ko'radi), 🛠 admin (admin panel).
 import asyncio
 import io
 import logging
+import re
 import uuid
 
 from aiogram import BaseMiddleware, Dispatcher, F
@@ -305,7 +306,16 @@ async def send_tables(chat_id: int, uid: int, kinds=("vehicle", "driver")):
     for kind in kinds:
         pngs = await asyncio.to_thread(tables.table_pngs, uid, kind)
         for png in pngs:
-            await bot.send_photo(chat_id, BufferedInputFile(png, "jadval.png"))
+            try:
+                from PIL import Image
+                wide = Image.open(io.BytesIO(png)).size[0] > 2400
+            except Exception:
+                wide = False
+            name = "furalar.png" if kind == "vehicle" else "haydovchilar.png"
+            if wide:  # keng jadval siqilib qolmasligi uchun fayl ko'rinishida (to'liq sifat)
+                await bot.send_document(chat_id, BufferedInputFile(png, name), caption="📊 To'liq sifatli jadval")
+            else:
+                await bot.send_photo(chat_id, BufferedInputFile(png, name))
             sent_any = True
     if not sent_any:
         await bot.send_message(chat_id, "Jadval uchun hali ma'lumot yo'q. Avval hujjat rasmlarini yuboring.")
@@ -724,9 +734,20 @@ async def btn_cargo(m: Message, u: dict):
     await m.answer(CARGO_HINT, reply_markup=K(inline_keyboard=[[B(text="📦 Qidiruvlarim holati", callback_data="cg:status")]]))
 
 
+_INTENT = re.compile(r"(yuk|юк|груз|gruz|fura|фура|mashina|машин|tent|тент|\bref|реф|transport|транспорт)", re.I)
+_FROM = re.compile(r"(\w(dan|дан|den|tan|тан)\b|\bиз\s|\bс\s|\bfrom\s|→|->|—|\s-\s)", re.I)
+CARGO_EXAMPLE = ("✍️ Iltimos, to'liqroq yozing - qayerDAN, qayerGA va nima kerakligini:\n\n"
+                 "• «Toshkentdan Moskvaga yuk kerak» - furangiz bor, yuk qidiryapsiz\n"
+                 "• «Toshkentdan Moskvaga fura kerak» - yukingiz bor, mashina qidiryapsiz")
+
+
 async def cargo_input(m: Message):
     uid = m.from_user.id
-    q = await ai.parse_cargo_query(m.text or "")
+    text = (m.text or "").strip()
+    if not _INTENT.search(text) or not _FROM.search(text):
+        await m.answer(CARGO_EXAMPLE)
+        return
+    q = await ai.parse_cargo_query(text)
     if not q.get("origin"):
         await m.answer("Qayerdan ekanini tushunmadim. Masalan: «Toshkent Moskva yuk kerak»")
         return
@@ -753,7 +774,7 @@ async def cb_cargo(cb: CallbackQuery, u: dict):
         await send_long(cb.message, cargo.status_text(uid))
         return
     if parts[1] == "stop":
-        res = cargo.cancel(uid, stop_chats=False)
+        cargo.cancel(uid, stop_chats=False)
         await core.safe_edit(cb.message, (cb.message.text or "") + "\n\n⏹ To'xtatildi.")
         await cb.answer("To'xtatildi")
         return

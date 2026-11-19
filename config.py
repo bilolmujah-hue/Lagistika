@@ -145,6 +145,25 @@ DRIVER_DOCS_SHORT = {
 }
 
 ALL_DOCS = {**VEHICLE_DOCS, **DRIVER_DOCS}
+
+# Jadval va Excel uchun ruscha nomlar
+VEHICLE_DOCS_RU = {
+    "texpasport": "Техпаспорт", "dopusk": "Допуск", "litsenziya": "Лицензия", "tahograf": "Тахограф",
+    "texkorik": "Техосмотр", "tir": "TIR", "dazvol": "Разрешение\n(дозвол)", "sugurta_uz": "Страховка\nУзбекистан",
+    "sugurta_kz": "Страховка\nКазахстан", "sugurta_ru": "Страховка\nРоссия", "yashil_karta": "Зелёная карта\n(Китай)",
+}
+DRIVER_DOCS_RU = {
+    "zagranpasport": "Загран-\nпаспорт", "prava": "Водительское\nудостоверение", "milliy_pasport": "ID-паспорт",
+    "shengen": "Шенгенская\nвиза", "kod95": "Код 95", "adr": "ADR", "chip_karta": "Карта\nтахографа",
+    "plastik_karta": "Банковская\nкарта",
+}
+REMINDER_LABELS_RU = {
+    "china_entry": "Онлайн-очередь на въезд в Китай",
+    "russia_exit": "Онлайн-очередь на выезд в Россию",
+    "uz_entry": "Онлайн-очередь на въезд в Узбекистан",
+    "debt": "Напомнить об оплате долга",
+    "custom": "Задача",
+}
 NO_EXPIRY_TYPES = {"texpasport"}
 MULTI_DOC_TYPES = {"plastik_karta"}
 
