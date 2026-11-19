@@ -13,22 +13,23 @@ Ban xavfini kamaytirish: har bir userbot kuniga MAX_DMS_PER_ACCOUNT_DAY tadan ko
 yangi odamlarga yozish orasida 1-3 daqiqa kutadi, bitta odamga 7 kun ichida qayta yozilmaydi.
 """
 import asyncio
+import hashlib
 import json
 import logging
 import random
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from anthropic import AsyncAnthropic
 from telethon import errors
 
 import config
 import core
 import database as dbm
+import llm
 import userbot
 
-client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY or "missing")
 
 _SEARCH_TASKS: dict = {}
 _OUTREACH_TASKS: dict = {}
@@ -36,7 +37,6 @@ _TIMERS: dict = {}
 _SLEEPING: set = set()
 _DIRTY: set = set()
 _LOCKS: dict = {}
-_MSG_CACHE: dict = {}      # chat_id -> {"t", "since", "msgs", "aid"}
 _LAST_FIRST_DM: dict = {}  # account_id -> vaqt
 CACHE_SEC = 300
 
@@ -50,11 +50,6 @@ def _jparse(text: str) -> dict:
     if a == -1 or b == -1:
         raise ValueError("AI javobida JSON yo'q")
     return json.loads(text[a:b + 1])
-
-
-async def _llm(model: str, system: str, messages: list, max_tokens: int = 1500) -> str:
-    resp = await client.messages.create(model=model, max_tokens=max_tokens, system=system, messages=messages)
-    return "".join(b.text for b in resp.content if b.type == "text")
 
 
 def _norm(s: str) -> str:
@@ -76,45 +71,48 @@ def start_search(uid: int, origin: str, destination: str, note: str, hours=None,
         asyncio.create_task(core.notify_admins("⚠️ Foydalanuvchi yuk qidirmoqchi, lekin birorta ham faol "
                                                "userbot ulanmagan! Admin panel → 🤖 Userbotlar."))
         return {"xato": "Qidiruv tizimi hozircha vaqtincha ishlamayapti. Admin xabardor qilindi."}
-    if not dbm.pool_all_groups():
-        asyncio.create_task(core.notify_admins("⚠️ Userbotlarda kuzatiladigan guruh tanlanmagan! "
-                                               "Admin panel → 🤖 Userbotlar → akkaunt → Guruhlar."))
-        return {"xato": "Qidiruv tizimi hozircha sozlanmoqda. Admin xabardor qilindi."}
     t = _SEARCH_TASKS.get(uid)
     if t and not t.done():
         return {"xato": "Oldingi qidiruv hali tugamadi, biroz kuting."}
     try:
-        hours = max(1, min(int(hours or config.SEARCH_HOURS), 72))
+        hours = max(1, min(int(hours or dbm.setting_int("search_hours", 12)), 72))
     except (TypeError, ValueError):
-        hours = config.SEARCH_HOURS
+        hours = dbm.setting_int("search_hours", 12)
     rid = dbm.create_request(uid, origin, destination or "", note or "", hours, mode)
     _SEARCH_TASKS[uid] = asyncio.create_task(_run_search(uid, rid))
     return {"ok": True, "request_id": rid, "izoh": "Qidiruv fonda boshlandi. Natija tayyor bo'lgach bot o'zi yuboradi."}
 
 
-async def expand_places(*places) -> list:
-    places = [p for p in places if p]
-    stems = set()
-    for p in places:
-        w = _norm(p).strip()
-        stems.add(w[:-1] if len(w) > 5 else w)
+async def place_stems(place: str) -> list:
+    """Joy nomining turli yozilishlari (lotin/kirill/ruscha/inglizcha + viloyati va yirik shaharlari).
+    Natija bazada saqlanadi - bir joy uchun AI faqat bir marta chaqiriladi."""
+    key = _norm(place).strip()
+    if not key:
+        return []
+    cached = dbm.place_stems_get(key)
+    if cached:
+        return cached
+    stems = {key[:-1] if len(key) > 5 else key}
     try:
-        raw = await _llm(
-            config.EXTRACT_MODEL, "Siz logistika bo'yicha tilshunos yordamchisiz. Faqat JSON qaytaring.",
+        raw = await llm.cheap(
+            "Siz logistika bo'yicha tilshunos yordamchisiz. Faqat JSON qaytaring.",
             [{"role": "user", "content":
-              "Yuk tashish guruhlarida joy nomlari turlicha yoziladi. Quyidagi joylar uchun qidiruv 'o'zaklari'ni bering: "
+              "Yuk tashish guruhlarida joy nomlari turlicha yoziladi. Quyidagi joy uchun qidiruv 'o'zaklari'ni bering: "
               "lotin (o'zbek), kirill (o'zbek va rus), inglizcha, mashhur qisqartma va xato yozilishlar. "
               "Qo'shimchalarsiz, kesilgan shaklda bering (masalan 'Moskva' -> 'moskv', 'москв', 'маскв', 'moscow'). "
-              "Shu joyning viloyati/mintaqasi nomi ham kirsin. Jami 8-25 ta.\n"
-              f"Joylar: {', '.join(places)}\n"
+              "Shu joyning viloyati/mintaqasi va undagi 3-6 ta yirik shahar nomi ham kirsin. Jami 8-30 ta.\n"
+              f"Joy: {place}\n"
               'Format: {"stems": ["...", "..."]}'}], 800)
-        for s in _jparse(raw).get("stems", []):
-            s = _norm(str(s)).strip()
-            if len(s) >= 3:
-                stems.add(s)
+        for x in _jparse(raw).get("stems", []):
+            x = _norm(str(x)).strip()
+            if len(x) >= 3:
+                stems.add(x)
+        out = sorted(stems)[:40]
+        dbm.place_stems_put(key, out)
+        return out
     except Exception:
-        logging.warning("Joy nomlarini kengaytirib bo'lmadi", exc_info=True)
-    return sorted(stems)[:60]
+        logging.warning("Joy nomini kengaytirib bo'lmadi", exc_info=True)
+        return sorted(stems)
 
 
 def _prefilter(text: str, stems: list) -> bool:
@@ -122,100 +120,150 @@ def _prefilter(text: str, stems: list) -> bool:
     return 12 <= len(t) <= 2500 and any(s in t for s in stems)
 
 
-CLASSIFY_SYSTEM = """Siz logistika (yuk tashish) Telegram guruhlaridagi e'lonlarni tahlil qiluvchisiz. Faqat JSON qaytaring.
+def _ad_key(text: str) -> str:
+    """Bir xil e'lon (turli guruhlarga tashlangan nusxalari) uchun bitta kalit."""
+    t = re.sub(r"[^0-9a-zа-яёўқғҳʼ']+", "", _norm(text))
+    return hashlib.sha1(t[:600].encode()).hexdigest()
 
-Atamalar:
-- YUK EGASI e'loni: "yuk bor", "груз есть", "yuk bor, mashina kerak", "fura kerak", "tent kerak", "нужна машина",
+
+PARSE_SYSTEM = """Siz logistika (yuk tashish) Telegram guruhlaridagi e'lonlarni tahlil qiluvchisiz. Faqat JSON qaytaring.
+
+Turlar:
+- "cargo" = YUK EGASI e'loni: "yuk bor", "груз есть", "mashina kerak", "fura kerak", "tent kerak", "нужна машина",
   "ищем транспорт", "yukimiz bor".
-- MASHINA EGASI (haydovchi/fura) e'loni: "yuk kerak", "yuk qidiryapman", "fura bor", "mashina bor", "машина есть",
-  "ищу груз", "свободна/bo'sh", "yuk berilsa".
-- Boshqa: reklama, savol, suhbat, yo'nalish yo'q xabarlar."""
+- "truck" = MASHINA EGASI (haydovchi/fura) e'loni: "yuk kerak", "yuk qidiryapman", "fura bor", "mashina bor",
+  "машина есть", "ищу груз", "свободна", "bo'sh", "yuk berilsa".
+- "other" = reklama, savol, suhbat, yo'nalishsiz xabar."""
 
 
-async def classify(req: dict, cands: list) -> list:
-    sem = asyncio.Semaphore(3)
-    dest = req["destination"] or "(ko'rsatilmagan - har qanday manzil mos)"
-    mode = req.get("mode") or "cargo"
-    want = ("YUK EGASI e'loni (mashina egasi e'loni emas)" if mode == "cargo"
-            else "MASHINA EGASI e'loni - bo'sh fura/mashina taklif qilinmoqda (yuk egasi e'loni emas)")
-    route_rule = ("jo'natish joyi so'rovdagi joy yoki uning atrofi/viloyati; manzil so'ralgan bo'lsa u ham mos"
-                  if mode == "cargo" else
-                  "mashina so'rovdagi jo'natish joyida/atrofida turibdi yoki shu yo'nalishda yuk qidiryapti; "
-                  "manzil yozilgan bo'lsa so'rovdagi manzilga mos")
+async def parse_ads(cands: list) -> dict:
+    """E'lonlarni so'rovdan MUSTAQIL tahlil qiladi: {kalit: {kind, origin, destination, cargo, phone}}.
+    Avval tahlil qilinganlar bazadan olinadi (pul ketmaydi), faqat yangilari AI ga yuboriladi."""
+    by_key = {}
+    for m in cands:
+        by_key.setdefault(m["_key"], m)
+    cache = dbm.ad_cache_get(by_key.keys())
+    todo = [m for k, m in by_key.items() if k not in cache]
+    todo.sort(key=lambda m: m["date"], reverse=True)
+    todo = todo[:config.MAX_PARSE_PER_SEARCH]
+    sem = asyncio.Semaphore(4)
 
     async def one(batch):
-        listing = "\n".join(f"[{j}] {json.dumps(m['text'][:450], ensure_ascii=False)}" for j, m in enumerate(batch))
-        prompt = (f"So'rov: {req['origin']} dan -> {dest} ga. Qo'shimcha: {req['note'] or '-'}\n\n"
-                  f"Xabarlar:\n{listing}\n\n"
-                  "Faqat quyidagi shartlarning HAMMASI bajarilgan xabarlarni qaytaring:\n"
-                  f"1) {want};\n2) {route_rule} (yo'nalish TESKARI bo'lsa mos emas).\n"
-                  'Format: {"results":[{"i":0,"origin":"...","destination":"...","cargo":"yuk turi yoki mashina turi yoki null",'
-                  '"phone":"xabardagi telefon yoki null"}]}. Mos xabar bo\'lmasa {"results":[]}.')
+        listing = "\n".join(f"[{j}] {json.dumps(m['text'][:400], ensure_ascii=False)}" for j, m in enumerate(batch))
+        prompt = (f"E'lonlar:\n{listing}\n\nFaqat cargo yoki truck turidagilarni qaytaring (other larni yozmang).\n"
+                  'Format: {"results":[{"i":0,"kind":"cargo|truck","origin":"jo\'natish joyi","destination":"manzil yoki null",'
+                  '"cargo":"yuk/mashina turi yoki null","phone":"telefon yoki null"}]}')
         async with sem:
             try:
-                raw = await _llm(config.EXTRACT_MODEL, CLASSIFY_SYSTEM, [{"role": "user", "content": prompt}], 2500)
+                raw = await llm.cheap(PARSE_SYSTEM, [{"role": "user", "content": prompt}], 3000)
                 res = _jparse(raw).get("results", [])
             except Exception:
-                logging.warning("Xabarlarni tasniflab bo'lmadi", exc_info=True)
-                return []
-        out = []
+                logging.warning("E'lonlarni tahlil qilib bo'lmadi", exc_info=True)
+                return
+        found = {}
         for r in res:
             try:
-                out.append((batch[int(r["i"])], r))
-            except (KeyError, ValueError, IndexError, TypeError):
+                found[int(r["i"])] = r
+            except (KeyError, ValueError, TypeError):
                 continue
-        return out
+        rows = []
+        for j, m in enumerate(batch):
+            r = found.get(j) or {}
+            kind = r.get("kind") if r.get("kind") in ("cargo", "truck") else "other"
+            row = {"key": m["_key"], "kind": kind, "origin": r.get("origin"), "destination": r.get("destination"),
+                   "cargo": r.get("cargo"), "phone": r.get("phone")}
+            rows.append(row)
+            cache[m["_key"]] = row
+        dbm.ad_cache_put(rows)
 
-    batches = [cands[i:i + 40] for i in range(0, len(cands), 40)]
-    parts = await asyncio.gather(*(one(b) for b in batches))
-    return [x for p in parts for x in p]
+    await asyncio.gather(*(one(todo[i:i + 50]) for i in range(0, len(todo), 50)))
+    return cache
 
 
-def _pick_reader(acc_ids: list):
-    conn = [a for a in acc_ids if userbot.is_connected(a)]
-    if not conn:
-        return None
-    return min(conn, key=lambda a: (dbm.dms_today_account(a), random.random()))
+def _route_ok(parsed: dict, o_stems: list, d_stems: list) -> bool:
+    org, dst = _norm(parsed.get("origin") or ""), _norm(parsed.get("destination") or "")
+    if not org or not any(s in org for s in o_stems):
+        return False
+    if d_stems and dst and not any(s in dst for s in d_stems):
+        return False
+    return True
 
 
-async def _read_chat(chat_id, acc_ids, since):
-    c = _MSG_CACHE.get(chat_id)
-    if c and time.time() - c["t"] < CACHE_SEC and c["since"] <= since and userbot.is_connected(c["aid"]):
-        return c["aid"], [m for m in c["msgs"] if m["date"] >= since]
-    aid = _pick_reader(acc_ids)
-    if aid is None:
-        raise RuntimeError("ulangan userbot yo'q")
-    msgs = await userbot.fetch_messages(aid, chat_id, since)
-    _MSG_CACHE[chat_id] = {"t": time.time(), "since": since, "msgs": msgs, "aid": aid}
-    return aid, msgs
+def _search_terms(place: str, stems: list) -> list:
+    """Telegram qidiruviga beriladigan 2-4 ta so'z (lotin + kirill + inglizcha)."""
+    key = _norm(place).strip()
+    base = key[:-1] if len(key) > 5 else key
+    terms = [base]
+    cyr = [x for x in stems if re.search(r"[а-яё]", x) and len(x) >= 4 and x not in terms]
+    lat = [x for x in stems if not re.search(r"[а-яё]", x) and len(x) >= 4 and x not in terms]
+    for x in cyr[:2] + lat[:1]:
+        if not any(x.startswith(t) or t.startswith(x) for t in terms):
+            terms.append(x)
+    return terms[:4]
+
+
+async def _collect(aid, terms, since, allowed) -> list:
+    out = []
+    for term in terms:
+        try:
+            msgs = await userbot.search_messages(aid, term, since, limit=200)
+        except Exception as e:
+            logging.warning("Global qidiruv ishlamadi (#%s, %s): %s - guruhlar bo'yicha qidiriladi", aid, term, e)
+            msgs = []
+            for chat_id in list(allowed)[:80]:
+                try:
+                    msgs += await userbot.search_messages(aid, term, since, limit=40, chat=chat_id)
+                except Exception:
+                    continue
+        out += [m for m in msgs if not allowed or m["chat_id"] in allowed]
+    return out
 
 
 async def _run_search(uid: int, rid: int):
     req = dbm.get_request(uid, rid)
     mode = req.get("mode") or "cargo"
+    want_n = max(1, dbm.setting_int("search_results", 5))
     try:
-        groups = dbm.pool_all_groups()
-        stems = await expand_places(req["origin"], req["destination"])
+        o_stems = await place_stems(req["origin"])
+        d_stems = await place_stems(req["destination"]) if req["destination"] else []
+        terms = _search_terms(req["origin"], o_stems)
         since = datetime.now(timezone.utc) - timedelta(hours=req["hours"])
-        cands, scanned, bad = [], 0, 0
-        sem = asyncio.Semaphore(4)
-
-        async def read(chat_id, info):
-            nonlocal scanned, bad
-            async with sem:
-                try:
-                    aid, msgs = await _read_chat(chat_id, info["accounts"], since)
-                except Exception as e:
-                    logging.warning("Guruhni o'qib bo'lmadi: %s (%s)", info["title"], e)
-                    bad += 1
-                    return
-            scanned += len(msgs)
+        accs = userbot.connected_pool()
+        res = await asyncio.gather(*(_collect(a["id"], terms, since, {g["chat_id"] for g in dbm.pool_groups(a["id"])})
+                                     for a in accs))
+        own = set(userbot.ME.values())
+        uniq = {}
+        scanned = 0
+        for a, msgs in zip(accs, res):
             for m in msgs:
-                if _prefilter(m["text"], stems):
-                    cands.append(dict(m, _aid=aid))
+                scanned += 1
+                if m["sender_id"] in own or not (12 <= len(m["text"]) <= 2500):
+                    continue
+                m = dict(m, _aid=a["id"], _key=_ad_key(m["text"]))
+                cur = uniq.get(m["_key"])
+                if cur is None or m["date"] > cur["date"]:
+                    uniq[m["_key"]] = m
+        cands = list(uniq.values())
+        # manzil so'zi bor e'lonlar oldinga, keyin eng yangilari
+        cands.sort(key=lambda m: (not (d_stems and _prefilter(m["text"], d_stems)), -m["date"].timestamp()))
 
-        await asyncio.gather(*(read(cid, info) for cid, info in groups.items()))
-        matches = await classify(req, cands)
+        want = "cargo" if mode == "cargo" else "truck"
+        matches, seen_senders, parsed_n = [], set(), 0
+        for i in range(0, len(cands), 25):
+            if len(seen_senders) >= want_n or parsed_n >= config.MAX_PARSE_PER_SEARCH:
+                break
+            batch = cands[i:i + 25]
+            parsed_n += len(batch)
+            parsed = await parse_ads(batch)
+            for m in batch:
+                pr = parsed.get(m["_key"])
+                if (pr and pr.get("kind") == want and _route_ok(pr, o_stems, d_stems)
+                        and m["sender_id"] not in seen_senders and len(seen_senders) < want_n):
+                    seen_senders.add(m["sender_id"])
+                    matches.append((m, pr))
+        groups = {m["chat_id"] for m in cands}
+        logging.info("Qidiruv #%s: %s ta xabar topildi, %s ta noyob, %s ta tahlil, %s ta mos", rid, scanned,
+                     len(cands), parsed_n, len(matches))
 
         by_sender = {}
         for m, parsed in matches:
@@ -236,9 +284,7 @@ async def _run_search(uid: int, rid: int):
 
         what = "yuk e'loni" if mode == "cargo" else "bo'sh mashina e'loni"
         head = (f"🔎 Qidiruv tugadi: {req['origin']} → {req['destination'] or 'istalgan manzil'}\n"
-                f"📨 {len(groups)} ta guruhda {scanned} ta xabar o'qildi, {len(new_leads)} ta {what} topildi.")
-        if bad:
-            head += f"\n⚠️ {bad} ta guruhni o'qib bo'lmadi."
+                f"📨 {len(groups)} ta guruhdan eng mos {len(new_leads)} ta {what} topildi.")
         if not new_leads:
             await core.send(uid, head + "\n\nHozircha mos e'lon topilmadi. Birozdan keyin qayta qidirib ko'ring "
                                         "yoki boshqa yo'nalish yozing.")
@@ -271,6 +317,29 @@ async def _run_search(uid: int, rid: int):
 
 
 # ====================================================================== 2) EGALARIGA YOZISH
+
+def cancel(uid: int, stop_chats: bool = False) -> dict:
+    """Qidiruv va yozishni to'xtatadi. stop_chats=True - boshlangan AI suhbatlarini ham to'xtatadi."""
+    stopped = []
+    for name, tasks in (("qidiruv", _SEARCH_TASKS), ("yozish", _OUTREACH_TASKS)):
+        t = tasks.pop(uid, None)
+        if t and not t.done():
+            t.cancel()
+            stopped.append(name)
+    with dbm.db() as c:
+        c.execute("UPDATE cargo_requests SET status='cancelled' WHERE user_id=? AND status='searching'", (uid,))
+        n_new = c.execute("UPDATE leads SET status='closed' WHERE user_id=? AND status='new'", (uid,)).rowcount
+        n_chat = 0
+        if stop_chats:
+            n_chat = c.execute("UPDATE leads SET status='closed' WHERE user_id=? AND status IN ('contacted','talking')",
+                               (uid,)).rowcount
+    return {"ok": True, "toxtatildi": stopped or ["faol jarayon yo'q edi"], "navbatdan_olindi": n_new,
+            "toxtatilgan_suhbatlar": n_chat}
+
+
+def stop_kb(rid):
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⏹ To'xtatish", callback_data=f"cg:stop:{rid}")]])
+
 
 def start_outreach(uid: int, rid: int) -> bool:
     t = _OUTREACH_TASKS.get(uid)
@@ -334,7 +403,8 @@ async def outreach(uid: int, rid: int):
     if pending:
         text += f"\n⏳ Navbatda yana {pending} ta."
         kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="▶️ Davom ettirish", callback_data=f"cs:{rid}")]])
+            InlineKeyboardButton(text="▶️ Davom ettirish", callback_data=f"cs:{rid}"),
+            InlineKeyboardButton(text="⏹ To'xtatish", callback_data=f"cg:stop:{rid}")]])
     await core.send(uid, text + "\nJavob kelsa suhbatni o'zim davom ettiraman, tugagach sizga xulosa yuboraman.", kb)
 
 
@@ -436,7 +506,7 @@ def _build_messages(lead: dict, msgs: list, opening: bool) -> list:
 
 
 async def deal_turn(req: dict, lead: dict, msgs: list, opening: bool = False) -> dict:
-    raw = await _llm(config.DEAL_MODEL, _deal_system(req, lead), _build_messages(lead, msgs, opening), 900)
+    raw = await llm.deal(_deal_system(req, lead), _build_messages(lead, msgs, opening), 900)
     try:
         return _jparse(raw)
     except Exception:

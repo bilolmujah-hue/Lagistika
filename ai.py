@@ -16,6 +16,7 @@ import config
 import core
 import database as dbm
 import gps
+import llm
 
 client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY or "missing")
 
@@ -113,7 +114,7 @@ mode: foydalanuvchining FURASI bor va YUK qidiryapti ("yuk kerak", "yuk qidiryap
 foydalanuvchining YUKI bor va MASHINA qidiryapti ("fura kerak", "mashina kerak", "машина нужна", "tent kerak") -> "truck".
 Aniq bo'lmasa "cargo". Ikki joy yozilgan bo'lsa birinchisi - origin, ikkinchisi - destination."""
     try:
-        return _parse_json(await _ask(config.EXTRACT_MODEL, prompt, 300))
+        return _parse_json(await llm.cheap("Faqat JSON qaytaring.", [{"role": "user", "content": prompt}], 300))
     except Exception:
         logging.warning("Qidiruv so'rovini tahlil qilib bo'lmadi", exc_info=True)
         parts = text.split()
@@ -129,7 +130,7 @@ Tekshiring: bu oddiy logistika e'lonimi (yuk bor / fura bor / xizmat taklifi)? U
 noqonuniy narsa, boshqa odamlarning shaxsiy ma'lumotlari yoki spam-havolalar yo'qmi?
 FAQAT JSON: {{"ok": true/false, "reason": "rad etilsa sababi (o'zbekcha, qisqa)", "tip": "matnni yaxshilash bo'yicha 1 jumlali maslahat yoki bo'sh"}}"""
     try:
-        return _parse_json(await _ask(config.EXTRACT_MODEL, prompt, 300))
+        return _parse_json(await llm.cheap("Faqat JSON qaytaring.", [{"role": "user", "content": prompt}], 300))
     except Exception:
         return {"ok": True, "reason": "", "tip": ""}
 
@@ -247,6 +248,10 @@ MANAGER_TOOLS = [
        {"origin": S, "destination": S, "mode": {"type": "string", "enum": ["cargo", "truck"]},
         "note": S, "hours": {"type": "integer", "description": "necha soat orqaga (odatda 24)"}}, ["origin"]),
     _t("cargo_status", "Qidiruvlar va e'lon egalari bilan suhbatlar holati."),
+    _t("cargo_cancel", "Yuk/fura qidiruvini va e'lon egalariga yozishni DARHOL TO'XTATISH. Foydalanuvchi 'bekor qil', "
+                       "'to'xtat', 'qidirma', 'yozma' desa shuni chaqiring. stop_chats=true - boshlangan AI suhbatlarini "
+                       "ham to'xtatadi (foydalanuvchi 'hammasini to'xtat', 'gaplashma' desa).",
+       {"stop_chats": B}),
 
     _t("autopost_status", "Avto xabar (guruhlarga e'lon yuborish) holati: ulangan akkaunt, guruhlar, matn, bugun nechta."),
     _t("autopost_control", "Avto xabarni boshqarish: action=start | stop | set_text | set_interval | open_menu. "
@@ -739,6 +744,8 @@ async def _run_manager_tool(ctx: ChatContext, name: str, a: dict):
                                   a.get("hours"), a.get("mode") or "cargo")
     if name == "cargo_status":
         return cargo.status_report(uid)
+    if name == "cargo_cancel":
+        return cargo.cancel(uid, bool(a.get("stop_chats")))
 
     # ---------------- avto xabar
     if name == "autopost_status":
@@ -834,6 +841,10 @@ Siz ulangan manbalar: (1) baza - furalar, haydovchilar, hujjatlar, eslatmalar; (
 (3) yuk guruhlari - yuk/fura qidirish va e'lon egalari bilan avtomatik suhbat; (4) avto xabar - foydalanuvchi
 akkaunti orqali guruhlarga e'lon yuborish.
 
+Uslub: siz tajribali, xushmuomala logistika dispetcherisiz. Qisqa, aniq va ishonchli yozing, ortiqcha his-hayajon,
+uzr va bo'sh gaplarsiz. Hech qachon "buni qila olmayman" demang - quyidagi tool'lar bilan deyarli hamma narsani
+qila olasiz. Agar haqiqatan imkon bo'lmasa, qaysi tugma yoki bo'lim orqali qilish mumkinligini ayting.
+
 Qoidalar:
 1. Savolga javob berishdan oldin kerakli tool'ni chaqiring.
 2. Faqat fura raqami yozilsa yoki "shu fura haqida" desa - vehicle_overview va BARCHA ma'lumotni bering.
@@ -846,6 +857,7 @@ Qoidalar:
    ko'radi va eslatmalar unga ham boradi.
 7. "Toshkentdan Moskvaga yuk kerak" -> cargo_search(mode=cargo); "Andijondan Almatiga fura kerak" -> cargo_search(mode=truck).
    Keyin qisqa "🔎 Qidirilmoqda..." deb yozing - natijani bot o'zi yuboradi. Natijani to'qimang.
+   "Bekor qil", "to'xtat", "qidirmay qo'y" -> cargo_cancel; "gaplashishni ham to'xtat" -> cargo_cancel(stop_chats=true).
 8. Avto xabar haqida so'rasa autopost_status / autopost_control. "To'xtat" -> stop, "yoq" -> start.
 9. Obuna, to'lov haqida - subscription_status / open_payment.
 10. Bir nechta amal so'ralsa hammasini bajaring.
@@ -862,7 +874,9 @@ async def chat(user: dict, text: str):
         tools = MANAGER_TOOLS + (ADMIN_TOOLS if dbm.is_admin(uid) else [])
     dbm.save_message(uid, "user", text)
     messages = dbm.load_history(uid)
-    system = _system_prompt(ctx)
+    # Prompt caching: tool'lar va system prompt keshlanadi -> takroriy so'rovlarda kirish narxi ancha arzon
+    tools = tools[:-1] + [dict(tools[-1], cache_control={"type": "ephemeral"})]
+    system = [{"type": "text", "text": _system_prompt(ctx), "cache_control": {"type": "ephemeral"}}]
 
     for _ in range(12):
         resp = await client.messages.create(

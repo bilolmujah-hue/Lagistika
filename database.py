@@ -103,6 +103,11 @@ CREATE TABLE IF NOT EXISTS ap_campaigns(
 CREATE TABLE IF NOT EXISTS ap_groups(
     id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
     title TEXT, active INTEGER DEFAULT 1, note TEXT, UNIQUE(campaign_id, chat_id));
+CREATE TABLE IF NOT EXISTS ad_cache(
+    key TEXT PRIMARY KEY, kind TEXT, origin TEXT, destination TEXT, cargo TEXT, phone TEXT, created TEXT);
+CREATE TABLE IF NOT EXISTS ap_bad_chats(chat_id INTEGER PRIMARY KEY, title TEXT, reason TEXT, created TEXT);
+CREATE TABLE IF NOT EXISTS place_stems(place TEXT PRIMARY KEY, stems TEXT, created TEXT);
+
 CREATE TABLE IF NOT EXISTS ap_log(
     campaign_id INTEGER, chat_id INTEGER, day TEXT, count INTEGER DEFAULT 0,
     PRIMARY KEY(campaign_id, chat_id, day));
@@ -118,6 +123,7 @@ MIGRATIONS = {
     "drivers": [("tg_user_id", "INTEGER")],
     "cargo_requests": [("mode", "TEXT DEFAULT 'cargo'")],
     "leads": [("account_id", "INTEGER"), ("mode", "TEXT")],
+    "ap_groups": [("last_msg_id", "INTEGER"), ("del_count", "INTEGER DEFAULT 0")],
 }
 
 INDEXES = """
@@ -1501,3 +1507,68 @@ def lead_msgs(lead_id):
 def clear_history(uid):
     with db() as c:
         c.execute("DELETE FROM messages WHERE user_id=?", (uid,))
+
+
+# ====================================================================== E'LON TAHLILI KESHI (AI xarajatini kamaytirish)
+
+def ad_cache_get(keys) -> dict:
+    keys = list(keys)
+    out = {}
+    with db() as c:
+        for i in range(0, len(keys), 500):
+            part = keys[i:i + 500]
+            for r in c.execute(f"SELECT * FROM ad_cache WHERE key IN ({','.join('?' * len(part))})", part):
+                out[r["key"]] = dict(r)
+    return out
+
+
+def ad_cache_put(rows):
+    with db() as c:
+        c.executemany("INSERT OR REPLACE INTO ad_cache(key, kind, origin, destination, cargo, phone, created) "
+                      "VALUES(?,?,?,?,?,?,?)",
+                      [(r["key"], r.get("kind"), r.get("origin"), r.get("destination"), r.get("cargo"),
+                        r.get("phone"), now_iso()) for r in rows])
+
+
+def ad_cache_cleanup(days=10):
+    cutoff = (datetime.now(config.TZ) - timedelta(days=days)).isoformat(timespec="seconds")
+    with db() as c:
+        c.execute("DELETE FROM ad_cache WHERE created<?", (cutoff,))
+
+
+def place_stems_get(place):
+    with db() as c:
+        r = c.execute("SELECT stems FROM place_stems WHERE place=?", (place,)).fetchone()
+        return json.loads(r["stems"]) if r else None
+
+
+def place_stems_put(place, stems):
+    with db() as c:
+        c.execute("INSERT OR REPLACE INTO place_stems(place, stems, created) VALUES(?,?,?)",
+                  (place, json.dumps(stems, ensure_ascii=False), now_iso()))
+
+
+def ap_group_set(cid, chat_id, **fields):
+    allowed = {"last_msg_id", "del_count", "active", "note"}
+    items = [(k, v) for k, v in fields.items() if k in allowed]
+    if items:
+        with db() as c:
+            c.execute(f"UPDATE ap_groups SET {', '.join(k + '=?' for k, _ in items)} WHERE campaign_id=? AND chat_id=?",
+                      [v for _, v in items] + [cid, chat_id])
+
+
+def ap_group_get(cid, chat_id):
+    with db() as c:
+        r = c.execute("SELECT * FROM ap_groups WHERE campaign_id=? AND chat_id=?", (cid, chat_id)).fetchone()
+        return dict(r) if r else None
+
+
+def ap_bad_add(chat_id, title, reason):
+    with db() as c:
+        c.execute("INSERT OR REPLACE INTO ap_bad_chats(chat_id, title, reason, created) VALUES(?,?,?,?)",
+                  (chat_id, title, reason, now_iso()))
+
+
+def ap_bad_ids() -> dict:
+    with db() as c:
+        return {r["chat_id"]: r["reason"] for r in c.execute("SELECT chat_id, reason FROM ap_bad_chats")}

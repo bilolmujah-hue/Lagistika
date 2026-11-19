@@ -20,6 +20,7 @@ import config
 import core
 import database as dbm
 import gps
+import llm
 import login
 import payments
 import pickers
@@ -42,9 +43,11 @@ SETTING_TITLES = {
     "trial_days": ("🆓 Sinov (kun)", "Yangi menejerlarga necha kun bepul? Masalan 10"),
     "pay_window_min": ("⏳ To'lov vaqti (daq)", "To'lov uchun necha daqiqa beriladi? Masalan 10"),
     "user_dm_day": ("💬 Kunlik DM limiti", "Bitta foydalanuvchi uchun kuniga eng ko'pi nechta e'lon egasiga yoziladi?"),
+    "search_results": ("🔎 Qidiruv natijalari", "Bitta qidiruvda nechta e'lon topilsa to'xtasin? (tavsiya: 5)"),
+    "search_hours": ("🕒 Qidiruv soatlari", "Guruhlarda necha soat orqaga qidirilsin? (tavsiya: 12)"),
     "support": ("🆘 Yordam @username", "Foydalanuvchilar murojaat qiladigan @username yuboring"),
 }
-NUMERIC = {"price", "period_days", "trial_days", "pay_window_min", "user_dm_day"}
+NUMERIC = {"price", "period_days", "trial_days", "pay_window_min", "user_dm_day", "search_results", "search_hours"}
 
 
 def _uname(u) -> str:
@@ -105,7 +108,10 @@ def stats_text():
             f"  Jami: {core.money(s['rev_all'])} so'm ({s['pay_all']} ta)\n\n"
             f"🚛 Furalar: {s['vehicles']} · 👤 Haydovchilar (baza): {s['drivers_db']} · 📄 Hujjatlar: {s['docs']}\n"
             f"📍 GPS ulanganlar: {s['gps_users']}\n🔎 Qidiruvlar: {s['searches']} · 💬 Yozilgan e'lon egalari: {s['leads']}\n"
-            f"📢 Faol avto xabarlar: {s['campaigns']}")
+            f"📢 Faol avto xabarlar: {s['campaigns']}\n\n"
+            f"🤖 AI chaqiruvlari (bot ishga tushgandan beri): Groq {llm.STATS['groq']} · Gemini {llm.STATS['gemini']} · "
+            f"Claude {llm.STATS['claude']} · xato {llm.STATS['errors']}\n"
+            f"Arzon AI: {'✅ ' + ', '.join(n for n, on in (('Groq', config.GROQ_API_KEYS), ('Gemini', config.CHEAP_AI_KEY)) if on) if llm.cheap_enabled() else '❌ ulanmagan (hammasi Claude da)'}")
 
 
 # ====================================================================== FOYDALANUVCHILAR
@@ -332,10 +338,15 @@ def gps_req_view(rid):
         pwd = "(ochib bo'lmadi)"
     text = (f"📍 GPS so'rovi #{rid} ({r['status']})\n👤 {_uname(u)} (ID {r['user_id']})\n📞 {u.get('phone') or '-'}\n\n"
             f"🌐 Server: {r['server']}\n👤 Login: {r['login']}\n🔑 Parol: {pwd}\n\n"
-            "Qadamlar: serverga shu login bilan kiring → Foydalanuvchi sozlamalari → «Tokenlar» (yoki "
-            "hosting.wialon / oauth orqali) token yarating → «🔑 Token kiritish» ni bosib tokenni yuboring.\n"
-            "Token saqlangach parol bazadan o'chiriladi.")
-    rows = [[B(text="🔑 Token kiritish", callback_data=f"ad:gt:{rid}"), B(text="❌ Rad etish", callback_data=f"ad:gx:{rid}")],
+            "TOKEN OLISH (1 daqiqa):\n"
+            "1) Pastdagi «🌐 Token sahifasi» tugmasini bosing (brauzerda ochiladi).\n"
+            "2) Yuqoridagi login va parolni kiriting → «Kirish/Войти».\n"
+            "3) Ochilgan sahifaning MANZIL SATRIDA «access_token=…» bo'ladi. Manzilni to'liq nusxalang.\n"
+            "4) «🔑 Token kiritish» ni bosib, nusxalangan manzilni shu yerga yuboring - bot tokenni o'zi ajratib oladi.\n\n"
+            "Login/parol xato bo'lsa - «❌ Rad etish». Token saqlangach parol bazadan o'chiriladi.")
+    rows = [[B(text="🌐 Token sahifasi", url=gps.oauth_link(r["server"]))],
+            [B(text="🔁 Avto urinish", callback_data=f"ad:ga:{rid}")],
+            [B(text="🔑 Token kiritish", callback_data=f"ad:gt:{rid}"), B(text="❌ Rad etish", callback_data=f"ad:gx:{rid}")],
             back("ad:gps")]
     return text, K(inline_keyboard=rows)
 
@@ -349,7 +360,7 @@ async def save_gps_token(admin_id, uid, server, token, rid=None) -> str:
     ok, info = await gps.check_token(server, token)
     if not ok:
         return f"❌ Token ishlamadi: {info}\nTekshirib qayta yuboring."
-    dbm.set_user(uid, gps_url=server, gps_token=core.enc(token))
+    dbm.set_user(uid, gps_url=gps.site_root(server), gps_token=core.enc(token))
     if rid:
         dbm.gps_req_close(rid, "done", admin_id)
     await core.send(uid, "✅ GPS muvaffaqiyatli o'rnatildi!\n\nEndi «📍 GPS» tugmasi orqali furalaringiz joylashuvi, "
@@ -485,12 +496,12 @@ async def handle_input(m: Message, w: dict):
         ok = await core.send(w["uid"], f"✉️ Admindan xabar:\n\n{text}")
         await m.answer("✅ Yuborildi." if ok else "❌ Yuborib bo'lmadi (botni bloklagan bo'lishi mumkin).")
     elif k == "admin:gtok":
-        token = text.split()[-1] if text else ""
+        token = gps.extract_token(text)
         if len(token) < 20:
             await m.answer("Token juda qisqa. Wialon tokenini to'liq yuboring.")
             return
         server = w.get("server") or config.GPS_DEFAULT_SERVER
-        if len(text.split()) == 2:
+        if len(text.split()) == 2 and "access_token" not in text:
             server = text.split()[0]
         wait = await m.answer("⏳ Token tekshirilmoqda...")
         res = await save_gps_token(uid, w["uid"], server, token, w.get("rid"))
@@ -701,6 +712,17 @@ async def cb_admin(cb: CallbackQuery):
         else:
             core.WAIT[uid] = {"k": "admin:gtok", "uid": r["user_id"], "server": r["server"], "rid": r["id"]}
             await msg.answer(f"🔑 #{r['id']} uchun Wialon tokenini yuboring (server: {r['server']}):")
+    elif act == "ga":
+        r = dbm.gps_req_get(int(p[2]))
+        if not r or r["status"] != "pending":
+            alert = "So'rov allaqachon ko'rib chiqilgan"
+        else:
+            cred, info = await gps.auto_connect(r["server"], r["login"], core.dec(r["password"]))
+            if cred:
+                res = await save_gps_token(uid, r["user_id"], r["server"], cred, r["id"])
+                await msg.answer(res)
+            else:
+                alert = f"Avtomatik bo'lmadi: {info}"[:180]
     elif act == "gx":
         r = dbm.gps_req_get(int(p[2]))
         if r and r["status"] == "pending":

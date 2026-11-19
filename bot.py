@@ -36,40 +36,54 @@ dp = Dispatcher()
 B = InlineKeyboardButton
 K = InlineKeyboardMarkup
 
-# ---- menejer tugmalari
-BTN_VEHICLES = "🚛 Furalarim"
-BTN_DRIVERS = "👤 Haydovchilarim"
-BTN_TABLE = "📊 Umumiy jadval"
-BTN_EXPIRING = "⚠️ Muddati yaqinlar"
-BTN_REMINDERS = "⏰ Eslatmalarim"
-BTN_EXCEL = "📥 Excel hisobot"
+# ---- menejer tugmalari (qisqa va ixcham: 3 tadan qatorda)
+BTN_VEHICLES = "🚛 Furalar"
+BTN_DRIVERS = "👥 Haydovchilar"
+BTN_TABLE = "📊 Jadval"
+BTN_EXPIRING = "⚠️ Muddatlar"
+BTN_REMINDERS = "⏰ Eslatmalar"
+BTN_EXCEL = "📥 Excel"
 BTN_GPS = "📍 GPS"
-BTN_CARGO = "🔎 Yuklarni ko'rish"
+BTN_CARGO = "🔎 Yuk qidirish"
 BTN_AP = "📢 Avto xabar"
 BTN_SUB = "💳 Obuna"
-BTN_PROFILE = "👤 Profil"
+BTN_PROFILE = "⚙️ Profil"
 BTN_HELP = "ℹ️ Yordam"
 BTN_ADMIN = "🛠 Admin panel"
 # ---- haydovchi tugmalari
 BTN_MYDOCS = "📋 Hujjatlarim"
 BTN_MYTRUCK = "🚛 Furam"
 BTN_TRUCKLOC = "📍 Furam qayerda"
-BTN_DREM = "⏰ Eslatmalar"
+BTN_DREM = "🔔 Eslatmalarim"
+
+# eski klaviaturasi qolgan foydalanuvchilar uchun eski yozuvlar ham ishlayveradi
+OLD = {BTN_VEHICLES: {"🚛 Furalarim"}, BTN_DRIVERS: {"👤 Haydovchilarim"}, BTN_TABLE: {"📊 Umumiy jadval"},
+       BTN_EXPIRING: {"⚠️ Muddati yaqinlar"}, BTN_REMINDERS: {"⏰ Eslatmalarim"}, BTN_EXCEL: {"📥 Excel hisobot"},
+       BTN_CARGO: {"🔎 Yuklarni ko'rish"}, BTN_PROFILE: {"👤 Profil"}}
+
+
+def T(btn):
+    return F.text.in_({btn} | OLD.get(btn, set()))
+
 
 ALL_BUTTONS = {BTN_VEHICLES, BTN_DRIVERS, BTN_TABLE, BTN_EXPIRING, BTN_REMINDERS, BTN_EXCEL, BTN_GPS, BTN_CARGO,
                BTN_AP, BTN_SUB, BTN_PROFILE, BTN_HELP, BTN_ADMIN, BTN_MYDOCS, BTN_MYTRUCK, BTN_TRUCKLOC, BTN_DREM}
+ALL_BUTTONS |= {x for v in OLD.values() for x in v}
 
 
 def kb(rows):
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=t) for t in r] for r in rows], resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=t) for t in r] for r in rows], resize_keyboard=True,
+                               is_persistent=True, input_field_placeholder="Yozing yoki tugmani tanlang...")
 
 
 def menu_kb(u):
     if u and u.get("role") == "driver":
         rows = [[BTN_MYDOCS, BTN_MYTRUCK], [BTN_TRUCKLOC, BTN_DREM], [BTN_PROFILE, BTN_HELP]]
     else:
-        rows = [[BTN_VEHICLES, BTN_DRIVERS], [BTN_TABLE, BTN_EXPIRING], [BTN_REMINDERS, BTN_EXCEL],
-                [BTN_GPS, BTN_CARGO], [BTN_AP, BTN_SUB], [BTN_PROFILE, BTN_HELP]]
+        rows = [[BTN_VEHICLES, BTN_DRIVERS, BTN_TABLE],
+                [BTN_EXPIRING, BTN_REMINDERS, BTN_EXCEL],
+                [BTN_CARGO, BTN_AP, BTN_GPS],
+                [BTN_SUB, BTN_PROFILE, BTN_HELP]]
     if u and dbm.is_admin(u["user_id"]):
         rows.append([BTN_ADMIN])
     return kb(rows)
@@ -456,7 +470,7 @@ async def cmd_id(m: Message):
 
 
 @dp.message(Command("help"))
-@dp.message(F.text == BTN_HELP)
+@dp.message(T(BTN_HELP))
 async def cmd_help(m: Message, u: dict):
     sup = dbm.setting("support")
     tail = f"\n\n🆘 Yordam: {sup}" if sup else ""
@@ -476,11 +490,15 @@ async def cmd_cancel(m: Message):
             await userbot.login_cancel(m.from_user.id)
         await m.answer("Bekor qilindi.")
     else:
-        await m.answer("Bekor qiladigan narsa yo'q.")
+        res = cargo.cancel(m.from_user.id)
+        if res["toxtatildi"] and res["toxtatildi"][0] != "faol jarayon yo'q edi":
+            await m.answer("⏹ Yuk qidiruvi to'xtatildi.")
+        else:
+            await m.answer("Bekor qiladigan narsa yo'q.")
 
 
 @dp.message(Command("admin"))
-@dp.message(F.text == BTN_ADMIN)
+@dp.message(T(BTN_ADMIN))
 async def cmd_admin(m: Message):
     if not dbm.is_admin(m.from_user.id):
         return
@@ -489,7 +507,7 @@ async def cmd_admin(m: Message):
 
 # ====================================================================== MENEJER TUGMALARI
 
-@dp.message(F.text == BTN_VEHICLES)
+@dp.message(T(BTN_VEHICLES))
 async def btn_vehicles(m: Message, u: dict):
     if not await need_manager(m, u):
         return
@@ -497,7 +515,7 @@ async def btn_vehicles(m: Message, u: dict):
     await m.answer(text, reply_markup=k)
 
 
-@dp.message(F.text == BTN_DRIVERS)
+@dp.message(T(BTN_DRIVERS))
 async def btn_drivers(m: Message, u: dict):
     if not await need_manager(m, u):
         return
@@ -505,7 +523,7 @@ async def btn_drivers(m: Message, u: dict):
     await m.answer(text, reply_markup=k)
 
 
-@dp.message(F.text == BTN_TABLE)
+@dp.message(T(BTN_TABLE))
 async def btn_table(m: Message, u: dict):
     if not await need_manager(m, u):
         return
@@ -513,7 +531,7 @@ async def btn_table(m: Message, u: dict):
     await send_tables(m.chat.id, m.from_user.id)
 
 
-@dp.message(F.text == BTN_EXPIRING)
+@dp.message(T(BTN_EXPIRING))
 async def btn_expiring(m: Message, u: dict):
     if not await need_manager(m, u):
         return
@@ -530,8 +548,11 @@ async def btn_expiring(m: Message, u: dict):
     await send_long(m, f"⚠️ Muddati yaqin hujjatlar ({len(rows)} ta):\n\n" + "\n\n".join(lines))
 
 
-@dp.message(F.text == BTN_REMINDERS)
+@dp.message(T(BTN_REMINDERS))
 async def btn_reminders(m: Message, u: dict):
+    if u.get("role") == "driver":
+        await btn_drem(m, u)
+        return
     if not await need_manager(m, u):
         return
     rems = dbm.list_reminders(m.from_user.id)
@@ -546,7 +567,7 @@ async def btn_reminders(m: Message, u: dict):
         await m.answer(text, reply_markup=K(inline_keyboard=[[B(text="✅ Bajarildi", callback_data=f"rd:{r['id']}")]]))
 
 
-@dp.message(F.text == BTN_EXCEL)
+@dp.message(T(BTN_EXCEL))
 async def btn_excel(m: Message, u: dict):
     if not await need_manager(m, u):
         return
@@ -570,7 +591,7 @@ def gps_menu(u):
                                [B(text="🔑 Menda token bor", callback_data="gps:token")]]))
 
 
-@dp.message(F.text == BTN_GPS)
+@dp.message(T(BTN_GPS))
 async def btn_gps(m: Message, u: dict):
     if not await need_manager(m, u):
         return
@@ -651,13 +672,22 @@ async def gps_input(m: Message, w: dict, u: dict):
             await m.delete()
         except Exception:
             pass
+        wait = await m.answer("⏳ GPS ga ulanilmoqda...")
+        cred, info = await gps.auto_connect(w["server"], w["login"], text)
+        if cred:
+            dbm.set_user(uid, gps_url=gps.site_root(w["server"]), gps_token=core.enc(cred))
+            await core.safe_edit(wait, f"✅ GPS muvaffaqiyatli ulandi ({info})!\n«📍 GPS» tugmasini bosing yoki "
+                                       "yozing: «furalarim qayerda?»")
+            return
         rid = dbm.gps_req_add(uid, w["server"], w["login"], core.enc(text))
         await admin.notify_gps_request(rid)
-        await m.answer("✅ Ma'lumotlar adminga yuborildi.\n⏳ GPS ulanishini kuting - tayyor bo'lishi bilan sizga xabar keladi "
-                       "(odatda bir necha soat ichida).")
+        await core.safe_edit(wait, "⏳ Avtomatik ulab bo'lmadi, ma'lumotlar adminga yuborildi.\n"
+                                   "GPS ulanishi bilan sizga xabar keladi. (Login yoki parol xato bo'lsa - "
+                                   "«📍 GPS» → qayta yuboring.)")
     elif k == "gps:tok":
         parts = text.split()
-        server, token = (parts[0], parts[1]) if len(parts) == 2 else (config.GPS_DEFAULT_SERVER, parts[-1] if parts else "")
+        server = parts[0] if len(parts) == 2 else config.GPS_DEFAULT_SERVER
+        token = gps.extract_token(text)
         if len(token) < 20:
             await m.answer("Token juda qisqa. To'liq yuboring yoki /cancel.")
             return
@@ -686,7 +716,7 @@ Qayerdan qayerga kerakligini yozing, masalan:
 Bot yuk guruhlaridagi oxirgi 24 soatlik e'lonlarni tekshiradi va mos e'lonlarni ko'rsatadi. Xohlasangiz, e'lon egalari bilan o'zi gaplashib, narx va shartlarni aniqlab beradi."""
 
 
-@dp.message(F.text == BTN_CARGO)
+@dp.message(T(BTN_CARGO))
 async def btn_cargo(m: Message, u: dict):
     if not await need_manager(m, u):
         return
@@ -708,7 +738,8 @@ async def cargo_input(m: Message):
         return
     what = "yuk" if (q.get("mode") or "cargo") == "cargo" else "bo'sh fura"
     await m.answer(f"🔎 Qidirilmoqda: {q['origin']} → {q.get('destination') or 'istalgan manzil'} ({what})\n"
-                   "Guruhlar tekshirilmoqda, natija 1-3 daqiqada keladi...")
+                   f"Eng mos {dbm.setting_int('search_results', 5)} ta e'lon topiladi, natija 1-2 daqiqada keladi...",
+                   reply_markup=cargo.stop_kb(res["request_id"]))
 
 
 @dp.callback_query(F.data.startswith("cg:"))
@@ -720,6 +751,11 @@ async def cb_cargo(cb: CallbackQuery, u: dict):
     if parts[1] == "status":
         await cb.answer()
         await send_long(cb.message, cargo.status_text(uid))
+        return
+    if parts[1] == "stop":
+        res = cargo.cancel(uid, stop_chats=False)
+        await core.safe_edit(cb.message, (cb.message.text or "") + "\n\n⏹ To'xtatildi.")
+        await cb.answer("To'xtatildi")
         return
     rid = int(parts[2])
     if not dbm.get_request(uid, rid):
@@ -772,7 +808,7 @@ async def cb_lead_close(cb: CallbackQuery):
 
 # ---------------------------------------------------------------------- AVTO XABAR
 
-@dp.message(F.text == BTN_AP)
+@dp.message(T(BTN_AP))
 async def btn_ap(m: Message, u: dict):
     if not await need_manager(m, u):
         return
@@ -920,7 +956,7 @@ async def cb_noop(cb: CallbackQuery):
 
 # ---------------------------------------------------------------------- OBUNA VA TO'LOV
 
-@dp.message(F.text == BTN_SUB)
+@dp.message(T(BTN_SUB))
 async def btn_sub(m: Message, u: dict):
     if not await need_registered(m, u):
         return
@@ -968,7 +1004,7 @@ async def cb_pay(cb: CallbackQuery, u: dict):
 
 # ---------------------------------------------------------------------- PROFIL
 
-@dp.message(F.text == BTN_PROFILE)
+@dp.message(T(BTN_PROFILE))
 async def btn_profile(m: Message, u: dict):
     if not await need_registered(m, u):
         return
@@ -1005,7 +1041,7 @@ async def cb_profile(cb: CallbackQuery, u: dict):
 
 # ====================================================================== HAYDOVCHI TUGMALARI
 
-@dp.message(F.text == BTN_MYDOCS)
+@dp.message(T(BTN_MYDOCS))
 async def btn_mydocs(m: Message, u: dict):
     sc = await need_driver(m, u)
     if not sc:
@@ -1014,7 +1050,7 @@ async def btn_mydocs(m: Message, u: dict):
     await m.answer(driver_card(mid, d, for_manager=False))
 
 
-@dp.message(F.text == BTN_MYTRUCK)
+@dp.message(T(BTN_MYTRUCK))
 async def btn_mytruck(m: Message, u: dict):
     sc = await need_driver(m, u)
     if not sc:
@@ -1028,7 +1064,7 @@ async def btn_mytruck(m: Message, u: dict):
             [B(text="📍 Joylashuvi", callback_data=f"dvg:{v['id']}")]]))
 
 
-@dp.message(F.text == BTN_TRUCKLOC)
+@dp.message(T(BTN_TRUCKLOC))
 async def btn_truckloc(m: Message, u: dict):
     sc = await need_driver(m, u)
     if not sc:
@@ -1041,7 +1077,7 @@ async def btn_truckloc(m: Message, u: dict):
         await _send_vehicle_gps(m, u, v)
 
 
-@dp.message(F.text == BTN_DREM)
+@dp.message(T(BTN_DREM))
 async def btn_drem(m: Message, u: dict):
     sc = await need_driver(m, u)
     if not sc:

@@ -268,14 +268,49 @@ async def _warm(aid: int):
         logging.warning("Dialoglarni yuklab bo'lmadi (#%s)", aid, exc_info=True)
 
 
+def write_status(ent):
+    """Akkaunt shu guruhga oddiy xabar yoza oladimi? -> (bool, sabab)"""
+    if getattr(ent, "deactivated", False):
+        return False, "guruh o'chirilgan"
+    if getattr(ent, "creator", False) or getattr(ent, "admin_rights", None):
+        return True, ""
+    own = getattr(ent, "banned_rights", None)
+    if own and (getattr(own, "send_messages", False) or getattr(own, "send_plain", False)):
+        return False, "sizga yozish taqiqlangan"
+    dflt = getattr(ent, "default_banned_rights", None)
+    if dflt and (getattr(dflt, "send_messages", False) or getattr(dflt, "send_plain", False)):
+        return False, "guruhda faqat adminlar yozadi"
+    return True, ""
+
+
 async def list_groups(aid: int) -> list:
-    """Akkauntdagi barcha guruhlar (kanallar emas)."""
+    """Akkauntdagi barcha guruhlar (kanallar emas) + yozish mumkinmi."""
     out = []
     async for d in CLIENTS[aid].iter_dialogs():
         if d.is_group:
-            out.append({"chat_id": d.id, "title": d.name or str(d.id)})
+            ok, why = write_status(d.entity)
+            out.append({"chat_id": d.id, "title": d.name or str(d.id), "can_write": ok, "why": why})
     GROUP_CACHE[aid] = out
     return out
+
+
+def _msg_dict(m, chat_id=None):
+    """Telethon xabari -> lug'at. Oddiy foydalanuvchi yozmagan bo'lsa None."""
+    text = (m.raw_text or "").strip()
+    s = m.sender
+    if not text or not isinstance(s, types.User) or s.bot or s.deleted or s.is_self:
+        return None
+    chat_id = chat_id or m.chat_id
+    chat = m.chat
+    uname = getattr(chat, "username", None)
+    link = (f"https://t.me/{uname}/{m.id}" if uname
+            else f"https://t.me/c/{str(chat_id).replace('-100', '', 1)}/{m.id}")
+    return {
+        "msg_id": m.id, "chat_id": chat_id, "text": text, "date": m.date, "sender_id": s.id,
+        "access_hash": s.access_hash, "username": s.username,
+        "name": " ".join(x for x in (s.first_name, s.last_name) if x) or "Noma'lum",
+        "link": link, "chat_title": getattr(chat, "title", "") or "",
+    }
 
 
 async def fetch_messages(aid: int, chat_id: int, since, limit: int = 3000) -> list:
@@ -284,20 +319,24 @@ async def fetch_messages(aid: int, chat_id: int, since, limit: int = 3000) -> li
     async for m in CLIENTS[aid].iter_messages(chat_id, limit=limit, wait_time=1):
         if m.date < since:
             break
-        text = (m.raw_text or "").strip()
-        s = m.sender
-        if not text or not isinstance(s, types.User) or s.bot or s.deleted or s.is_self:
+        d = _msg_dict(m, chat_id)
+        if d:
+            out.append(d)
+    return out
+
+
+async def search_messages(aid: int, query: str, since, limit: int = 200, chat=None) -> list:
+    """Telegram serverining o'z qidiruvi. chat=None - akkaunt a'zo bo'lgan BARCHA chatlar bo'yicha (global).
+    Faqat so'z mos kelgan xabarlar qaytadi - 500 ta guruhni to'liq o'qish shart emas."""
+    out = []
+    async for m in CLIENTS[aid].iter_messages(chat, search=query, limit=limit, wait_time=1):
+        if m.date < since:
+            break
+        if chat is None and not m.is_group:
             continue
-        chat = m.chat
-        uname = getattr(chat, "username", None)
-        link = (f"https://t.me/{uname}/{m.id}" if uname
-                else f"https://t.me/c/{str(chat_id).replace('-100', '', 1)}/{m.id}")
-        out.append({
-            "msg_id": m.id, "text": text, "date": m.date, "sender_id": s.id,
-            "access_hash": s.access_hash, "username": s.username,
-            "name": " ".join(x for x in (s.first_name, s.last_name) if x) or "Noma'lum",
-            "link": link, "chat_title": getattr(chat, "title", "") or "",
-        })
+        d = _msg_dict(m)
+        if d:
+            out.append(d)
     return out
 
 

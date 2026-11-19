@@ -159,6 +159,10 @@ async def check_and_notify():
 async def reminder_loop():
     while True:
         try:
+            dbm.ad_cache_cleanup()
+        except Exception:
+            logging.exception("Kesh tozalashda xato")
+        try:
             await check_and_notify()
         except Exception:
             logging.exception("Eslatma sikli xatosi")

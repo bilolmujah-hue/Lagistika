@@ -56,12 +56,12 @@ class Wialon:
 
     async def call(self, svc: str, params: dict, retry: bool = True):
         data = {"svc": svc, "params": json.dumps(params)}
-        if svc != "token/login":
+        if svc not in ("token/login", "core/login"):
             await self.ensure()
             data["sid"] = self.sid
         r = (await _http.post(self.url, data=data)).json()
         if isinstance(r, dict) and r.get("error"):
-            if r["error"] == 1 and retry and svc != "token/login":  # sessiya eskirgan
+            if r["error"] == 1 and retry and svc not in ("token/login", "core/login"):  # sessiya eskirgan
                 self.sid = None
                 return await self.call(svc, params, retry=False)
             raise RuntimeError(f"Wialon xatosi: {r['error']}")
@@ -73,7 +73,11 @@ class Wialon:
         async with self.lock:
             if self.sid:
                 return
-            r = await self.call("token/login", {"token": self.token})
+            if self.token.startswith("pwd:"):  # token o'rniga login/parol (eski Wialon Local serverlar)
+                cr = json.loads(self.token[4:])
+                r = await self.call("core/login", {"user": cr["u"], "password": cr["p"]})
+            else:
+                r = await self.call("token/login", {"token": self.token})
             self.sid = r["eid"]
 
 
@@ -101,13 +105,75 @@ def client_for_user(u):
     return None
 
 
+def site_root(server: str) -> str:
+    s = (server or config.GPS_DEFAULT_SERVER).strip().rstrip("/")
+    if not s.startswith("http"):
+        s = "https://" + s
+    return s.split("/wialon/")[0]
+
+
+def extract_token(text: str) -> str:
+    """Admin tokenni o'zini yoki brauzerdagi butun manzilni (…access_token=XXX…) yuborsa ham ajratib oladi."""
+    m = re.search(r"access_token=([0-9A-Za-z]{40,100})", text or "")
+    if m:
+        return m.group(1)
+    parts = (text or "").split()
+    return parts[-1] if parts else ""
+
+
+def oauth_link(server: str) -> str:
+    """Admin shu havolani ochib, foydalanuvchi login/paroli bilan kirsa - manzil satrida access_token chiqadi."""
+    root = site_root(server)
+    return (f"{root}/login.html?client_id=LogistikaBot&access_type=-1&activation_time=0&duration=0"
+            f"&flags=0x1&redirect_uri={root}/post_token.html")
+
+
 async def check_token(server: str, token: str):
     """Tokenni tekshiradi. -> (True, akkaunt_nomi) | (False, xato_matni)"""
     try:
-        r = await Wialon(ajax_url(server), token).call("token/login", {"token": token})
-        return True, ((r.get("user") or {}).get("nm") or "OK")
+        w = Wialon(ajax_url(server), token)
+        await w.ensure()
+        r = await w.call("core/search_items", {
+            "spec": {"itemsType": "avl_unit", "propName": "sys_name", "propValueMask": "*", "sortType": "sys_name"},
+            "force": 1, "flags": 1, "from": 0, "to": 0})
+        return True, f"{len(r.get('items', []))} ta mashina"
     except Exception as e:
         return False, str(e)
+
+
+async def auto_connect(server: str, login: str, password: str):
+    """Login/parol bilan GPS ni avtomatik ulashga urinadi.
+    1) Wialon rasmiy login sahifasi (login.html -> oauth.html) orqali doimiy token olish;
+    2) bo'lmasa - eski core/login (ba'zi Wialon Local serverlarda ishlaydi).
+    -> (saqlanadigan_kalit, izoh) yoki (None, xato)"""
+    root = site_root(server)
+    params = {"client_id": "LogistikaBot", "access_type": "-1", "activation_time": "0", "duration": "0",
+              "flags": "0x1", "response_type": "token", "redirect_uri": f"{root}/post_token.html"}
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=False) as c:
+            r = await c.get(f"{root}/login.html", params=params)
+            sign = None
+            for pat in (r'name="sign"[^>]*value="([^"]+)"', r'value="([^"]+)"[^>]*name="sign"', r'"sign"\s*:\s*"([^"]+)"'):
+                m = re.search(pat, r.text)
+                if m:
+                    sign = m.group(1)
+                    break
+            data = dict(params, login=login, passw=password)
+            if sign:
+                data["sign"] = sign
+            r2 = await c.post(f"{root}/oauth.html", data=data)
+            token = extract_token(r2.headers.get("location", "") + " " + r2.text)
+            if token and len(token) >= 40 and re.fullmatch(r"[0-9A-Za-z]+", token):
+                ok, info = await check_token(root, token)
+                if ok:
+                    return token, info
+    except Exception as e:
+        logging.info("GPS OAuth orqali token olinmadi: %s", e)
+    cred = "pwd:" + json.dumps({"u": login, "p": password})
+    ok, info = await check_token(root, cred)
+    if ok:
+        return cred, info
+    return None, info
 
 
 async def get_units(w: Wialon) -> list:

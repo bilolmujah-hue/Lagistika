@@ -64,6 +64,30 @@ async def loop():
         await asyncio.sleep(20)
 
 
+DEL_LIMIT = 2   # xabari shuncha marta o'chirilsa - guruh avtomatik chiqariladi va qora ro'yxatga tushadi
+
+
+async def _verify_later(uid, cid, g, cl, msg_id):
+    """Yuborilgan xabar 60 soniyadan keyin hali bormi? Antispam bot o'chirgan bo'lsa - hisoblaymiz."""
+    await asyncio.sleep(60)
+    try:
+        m = await cl.get_messages(g["chat_id"], ids=msg_id)
+    except Exception:
+        return
+    cur = dbm.ap_group_get(cid, g["chat_id"]) or {}
+    if m is None or getattr(m, "message", None) is None and not getattr(m, "media", None):
+        n = (cur.get("del_count") or 0) + 1
+        dbm.ap_group_set(cid, g["chat_id"], del_count=n)
+        if n >= DEL_LIMIT:
+            dbm.ap_disable_group(cid, g["chat_id"], "xabarlar o'chirilmoqda")
+            dbm.ap_bad_add(g["chat_id"], g["title"], "xabarlarni o'chiradi (antispam)")
+            await core.send(uid, f"🚫 «{g['title']}» guruhi xabarlaringizni o'chirib tashlayapti (antispam). "
+                                 "Akkauntingiz spam olmasligi uchun bu guruh ro'yxatdan chiqarildi va boshqa "
+                                 "qo'shib bo'lmaydi.")
+    elif cur.get("del_count"):
+        dbm.ap_group_set(cid, g["chat_id"], del_count=0)
+
+
 async def _send(cl, chat_id, text):
     try:
         return await cl.send_message(chat_id, text)
@@ -99,9 +123,14 @@ async def run_once(c):
             if dbm.ap_count(c["id"], g["chat_id"], day) >= cap:
                 capped += 1
                 continue
+            if g["chat_id"] in dbm.ap_bad_ids():
+                dbm.ap_disable_group(c["id"], g["chat_id"], "qora ro'yxatda")
+                continue
             try:
-                await _send(cl, g["chat_id"], c["text"])
+                sent = await _send(cl, g["chat_id"], c["text"])
                 dbm.ap_inc(c["id"], g["chat_id"], day)
+                dbm.ap_group_set(c["id"], g["chat_id"], last_msg_id=sent.id)
+                asyncio.create_task(_verify_later(uid, c["id"], g, cl, sent.id))
             except errors.SlowModeWaitError:
                 pass  # guruhda sekin rejim - keyingi aylanishda
             except errors.FloodWaitError as e:
