@@ -379,9 +379,11 @@ async def save_gps_token(admin_id, uid, server, token, rid=None) -> str:
 # ====================================================================== AI KALITLAR
 
 def ai_view():
+    llm.purge_banned()
     rows, lines = [], ["🧠 AI KALITLAR (yuk qidiruvi va oddiy ishlar uchun)\n",
-                       "Bot yuqoridan pastga tartibda ishlatadi. Biri limitga yetsa yoki ishlamasa - keyingisiga o'tadi "
-                       "va sizga xabar keladi. Hammasi ishlamasa - Claude (qimmatroq) ishlatiladi.\n"]
+                       "Claude har bir yo'nalish uchun aniq ko'rsatma (joy nomlari barcha tillarda, hududi) tuzadi, "
+                       "DeepSeek / OpenAI shu ko'rsatma bilan e'lonlarni saralaydi. Biri limitga yetsa yoki ishlamasa - "
+                       "keyingisiga o'tadi va sizga xabar keladi. Hammasi ishlamasa - Claude ishlatiladi.\n"]
     now = dbm._dt(dbm.now_iso())
     for p in dbm.ai_list():
         cd = dbm._dt(p.get("cooldown_until"))
@@ -394,10 +396,8 @@ def ai_view():
         lines.append(f"{icon} #{p['id']} {p['name']} · {p['model']}\n    ✅ {p['calls']} · ❌ {p['fails']} · {st}")
         rows.append([B(text=f"{icon} #{p['id']} {p['name']} · {p['model']}"[:60], callback_data=f"ad:ai:{p['id']}")])
     env = []
-    if config.GROQ_API_KEYS:
-        env.append(f"Groq ({len(config.GROQ_API_KEYS)} ta kalit)")
     if config.CHEAP_AI_KEY:
-        env.append("Gemini")
+        env.append(f"{config.CHEAP_AI_MODEL}")
     if env:
         lines.append("\nRailway Variables dagi zaxira: " + ", ".join(env))
     if not dbm.ai_list() and not env:
@@ -839,10 +839,10 @@ async def cb_admin(cb: CallbackQuery):
         rows.append([B(text="🔧 Boshqa (o'z manzili)", callback_data="ad:aip:custom")])
         rows.append(back("ad:ai"))
         await core.safe_edit(msg, "➕ Qaysi AI xizmatini qo'shamiz?\n\n"
-                                  "• Groq - tez, bepul limiti bor (console.groq.com)\n"
+                                  "• DeepSeek - juda arzon va aniq (platform.deepseek.com)\n"
+                                  "• OpenAI - gpt-4.1-mini / gpt-5-mini (platform.openai.com)\n"
                                   "• OpenRouter - ko'p bepul modellar «:free» (openrouter.ai)\n"
-                                  "• Gemini - Google AI Studio (aistudio.google.com)\n"
-                                  "• DeepSeek, OpenAI - pullik, arzon", K(inline_keyboard=rows))
+                                  "• Gemini - Google AI Studio (aistudio.google.com)", K(inline_keyboard=rows))
     elif act == "aip":
         key = p[2]
         if key == "custom":

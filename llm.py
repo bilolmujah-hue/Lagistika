@@ -1,15 +1,18 @@
-"""Arzon AI provayderlari zanjiri (yuk qidiruvidagi ommaviy, oddiy ishlar uchun).
+"""AI provayderlari.
 
-Tartib:
-  1) Admin paneldan qo'shilgan AI lar (🛠 Admin → 🧠 AI): Groq, OpenRouter, Gemini, DeepSeek... (ustuvorlik bo'yicha)
-  2) Railway Variables dagi GROQ_API_KEYS, CHEAP_AI_KEY (zaxira)
-  3) Claude (EXTRACT_MODEL) - eng oxirgi zaxira, bot hech qachon to'xtamaydi.
+Ish taqsimoti:
+  • Claude (PLAN_MODEL) - "aqlli" ishlar: yo'nalish rejasi (joy nomining barcha tillardagi yozilishi, hududi),
+    arzon AI javobi buzuq bo'lsa - shu paketni qayta tahlil qilish. Natijalar keshlanadi -> xarajat juda kam.
+  • Arzon AI lar (🛠 Admin → 🧠 AI): DeepSeek, OpenAI, OpenRouter, Gemini yoki istalgan OpenAI-mos API -
+    ommaviy ishlar (e'lonlarni saralash). Claude tuzgan aniq ko'rsatma (prompt) bilan ishlaydi.
 
-Navbatma-navbat (ai_rotate=1): har bir so'rov keyingi AI dan boshlanadi - yuk bitta AI ga tushib qolmaydi,
-bepul limitlar tekis sarflanadi. Bir AI ishlamasa - darhol keyingisi.
-Kalit limiti tugasa (429) - vaqtincha chetlanadi va adminga xabar boradi.
-Kalit noto'g'ri bo'lsa (401/403) - o'chiriladi va adminga xabar boradi.
+Navbatma-navbat (ai_rotate=1): har bir so'rov keyingi AI dan boshlanadi - yuk bitta AI ga tushib qolmaydi.
+Bir AI ishlamasa - darhol keyingisi, hammasi ishlamasa - Claude. Bot hech qachon to'xtamaydi.
+Kalit limiti tugasa (429/402) - vaqtincha chetlanadi va adminga xabar boradi.
+Kalit noto'g'ri bo'lsa (401/403) yoki model yo'q (404) - o'chiriladi va adminga xabar boradi.
 Ketma-ket 3 marta tarmoq/server xatosi bersa - 10 daqiqaga chetlanadi va adminga xabar boradi.
+Model parametrlarni qabul qilmasa (yangi OpenAI: max_completion_tokens, temperature yo'q; DeepSeek reasoner:
+response_format yo'q) - bot buni o'zi aniqlaydi va eslab qoladi.
 """
 import itertools
 import logging
@@ -29,17 +32,20 @@ _claude = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY or "missing")
 _ENV_COOLDOWN: dict = {}
 _NOTIFIED: dict = {}
 _FAILS: dict = {}          # provayder -> ketma-ket xatolar soni
+_QUIRKS: dict = {}         # (url, model) -> {"tokens_key", "no_temp", "no_json"}
 _RR = itertools.count()    # navbatma-navbat hisoblagich
+_PURGED = False
 STATS = {"cheap": 0, "claude": 0, "errors": 0}
 
 PRESETS = {
-    "groq": ("Groq", "https://api.groq.com/openai/v1/chat/completions", "llama-3.3-70b-versatile"),
+    "deepseek": ("DeepSeek", "https://api.deepseek.com/chat/completions", "deepseek-chat"),
+    "openai": ("OpenAI", "https://api.openai.com/v1/chat/completions", "gpt-4.1-mini"),
     "openrouter": ("OpenRouter", "https://openrouter.ai/api/v1/chat/completions", "google/gemma-4-31b-it:free"),
     "gemini": ("Gemini", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
                "gemini-2.5-flash-lite"),
-    "deepseek": ("DeepSeek", "https://api.deepseek.com/chat/completions", "deepseek-chat"),
-    "openai": ("OpenAI", "https://api.openai.com/v1/chat/completions", "gpt-4.1-mini"),
 }
+
+_BANNED = ("groq",)  # botdan butunlay olib tashlangan xizmatlar
 
 
 class AIError(Exception):
@@ -48,10 +54,33 @@ class AIError(Exception):
         self.kind, self.wait = kind, wait
 
 
+def _banned(url) -> bool:
+    u = (url or "").lower()
+    return any(b in u for b in _BANNED)
+
+
+def purge_banned():
+    """Bazada qolgan Groq yozuvlarini bir marta o'chiradi."""
+    global _PURGED
+    if _PURGED:
+        return
+    try:
+        for p in dbm.ai_list():
+            if _banned(p["url"]) or _banned(p["name"]):
+                dbm.ai_delete(p["id"])
+                logging.info("Groq provayderi o'chirildi: #%s", p["id"])
+        _PURGED = True
+    except Exception:
+        logging.warning("Groq yozuvlarini o'chirib bo'lmadi", exc_info=True)
+
+
 def _providers():
+    purge_banned()
     now = datetime.now(config.TZ)
     out = []
     for p in dbm.ai_list(active_only=True):
+        if _banned(p["url"]):
+            continue
         cd = dbm._dt(p.get("cooldown_until"))
         if cd and cd > now:
             continue
@@ -60,11 +89,9 @@ def _providers():
         except Exception:
             continue
         out.append({"id": p["id"], "name": p["name"], "url": p["url"], "key": key, "model": p["model"]})
-    for k in config.GROQ_API_KEYS:
-        if _ENV_COOLDOWN.get(k, 0) < time.time():
-            out.append({"id": None, "name": "Groq (env)", "url": config.GROQ_URL, "key": k, "model": config.GROQ_MODEL})
-    if config.CHEAP_AI_KEY and _ENV_COOLDOWN.get(config.CHEAP_AI_KEY, 0) < time.time():
-        out.append({"id": None, "name": "Gemini (env)", "url": config.CHEAP_AI_URL, "key": config.CHEAP_AI_KEY,
+    if (config.CHEAP_AI_KEY and not _banned(config.CHEAP_AI_URL)
+            and _ENV_COOLDOWN.get(config.CHEAP_AI_KEY, 0) < time.time()):
+        out.append({"id": None, "name": "Zaxira (env)", "url": config.CHEAP_AI_URL, "key": config.CHEAP_AI_KEY,
                     "model": config.CHEAP_AI_MODEL})
     if len(out) > 1 and dbm.setting("ai_rotate") != "0":
         k = next(_RR) % len(out)
@@ -77,7 +104,7 @@ def _pkey(p) -> str:
 
 
 def cheap_enabled() -> bool:
-    return bool(dbm.ai_list(active_only=True) or config.GROQ_API_KEYS or config.CHEAP_AI_KEY)
+    return bool([p for p in dbm.ai_list(active_only=True) if not _banned(p["url"])] or config.CHEAP_AI_KEY)
 
 
 def _clean(text: str) -> str:
@@ -85,18 +112,31 @@ def _clean(text: str) -> str:
 
 
 async def call_openai_compat(url, key, model, system, messages, max_tokens=1500, json_mode=True) -> str:
-    body = {"model": model, "max_tokens": max_tokens, "temperature": 0,
-            "messages": [{"role": "system", "content": system}] + messages}
-    if json_mode:
-        body["response_format"] = {"type": "json_object"}
+    q = _QUIRKS.setdefault((url, model), {})
     headers = {"Authorization": f"Bearer {key}", "X-Title": "Logistika Bot"}
-    try:
-        r = await _http.post(url, json=body, headers=headers)
-    except httpx.HTTPError as e:
-        raise AIError("net", f"tarmoq xatosi: {e}")
-    if r.status_code == 400 and json_mode:  # ba'zi modellar json rejimini qo'llamaydi - usiz qayta urinamiz
-        body.pop("response_format", None)
-        r = await _http.post(url, json=body, headers=headers)
+    r = None
+    for _ in range(4):  # parametr xatolarini o'zi tuzatib qayta urinadi
+        body = {"model": model, q.get("tokens_key", "max_tokens"): max_tokens,
+                "messages": [{"role": "system", "content": system}] + messages}
+        if not q.get("no_temp"):
+            body["temperature"] = 0
+        if json_mode and not q.get("no_json"):
+            body["response_format"] = {"type": "json_object"}
+        try:
+            r = await _http.post(url, json=body, headers=headers)
+        except httpx.HTTPError as e:
+            raise AIError("net", f"tarmoq xatosi: {e}")
+        if r.status_code != 400:
+            break
+        err = r.text.lower()
+        if "max_tokens" in err and q.get("tokens_key") != "max_completion_tokens":
+            q["tokens_key"] = "max_completion_tokens"
+        elif "temperature" in err and not q.get("no_temp"):
+            q["no_temp"] = True
+        elif ("response_format" in err or "json" in err) and not q.get("no_json"):
+            q["no_json"] = True
+        else:
+            break
     if r.status_code == 429:
         ra = r.headers.get("retry-after")
         try:
@@ -179,7 +219,7 @@ async def _chain(system, messages, max_tokens, json_mode):
 
 
 async def cheap(system: str, messages: list, max_tokens: int = 1500, json_mode: bool = True) -> str:
-    """E'lonlarni tasniflash, joy nomlari, so'rovni tushunish kabi oddiy ishlar."""
+    """E'lonlarni saralash, so'rovni tushunish kabi ommaviy ishlar (DeepSeek, OpenAI...)."""
     out = await _chain(system, messages, max_tokens, json_mode)
     if out is not None:
         return out
@@ -189,21 +229,50 @@ async def cheap(system: str, messages: list, max_tokens: int = 1500, json_mode: 
     return await _claude_call(config.EXTRACT_MODEL, system, messages, max_tokens)
 
 
+async def smart(system: str, messages: list, max_tokens: int = 1500) -> str:
+    """Aniqlik muhim ishlar - Claude. Claude ishlamasa - arzon AI zanjiri."""
+    try:
+        return await _claude_call(config.PLAN_MODEL, system, messages, max_tokens)
+    except Exception as e:
+        STATS["errors"] += 1
+        logging.warning("Claude xatosi (smart): %s", e)
+        await _notify_once("claude_down", f"⚠️ Claude ishlamayapti: {str(e)[:200]}\nVaqtincha arzon AI ishlatilmoqda. "
+                                          "ANTHROPIC_API_KEY va balansni tekshiring.", every=3 * 3600)
+        out = await _chain(system, messages, max_tokens, True)
+        if out is None:
+            raise
+        return out
+
+
 async def deal(system: str, messages: list, max_tokens: int = 900) -> str:
-    """E'lon egalari bilan suhbat. DEAL_PROVIDER=cheap bo'lsa arzon zanjir, aks holda Claude (DEAL_MODEL)."""
+    """E'lon egalari bilan suhbat. DEAL_PROVIDER=cheap -> avval arzon AI, aks holda avval Claude.
+    Biri ishlamasa - ikkinchisi (suhbat hech qachon to'xtab qolmaydi)."""
     if config.DEAL_PROVIDER == "cheap":
         out = await _chain(system, messages, max_tokens, True)
         if out is not None:
             return out
-    return await _claude_call(config.DEAL_MODEL, system, messages, max_tokens)
+        return await _claude_call(config.DEAL_MODEL, system, messages, max_tokens)
+    try:
+        return await _claude_call(config.DEAL_MODEL, system, messages, max_tokens)
+    except Exception as e:
+        STATS["errors"] += 1
+        logging.warning("Claude xatosi (suhbat): %s", e)
+        await _notify_once("claude_deal", f"⚠️ Claude (mijozlar bilan suhbat) ishlamayapti: {str(e)[:200]}\n"
+                                          "Vaqtincha arzon AI ishlatilmoqda.", every=3 * 3600)
+        out = await _chain(system, messages, max_tokens, True)
+        if out is None:
+            raise
+        return out
 
 
 async def test(url, key, model):
     """-> (True, "javob vaqti") | (False, xato)"""
+    if _banned(url):
+        return False, "Bu xizmat botda ishlatilmaydi"
     t = time.time()
     try:
         out = await call_openai_compat(url, key, model, "Faqat JSON qaytaring.",
-                                       [{"role": "user", "content": 'Qaytaring: {"ok": true}'}], 30, True)
+                                       [{"role": "user", "content": 'Qaytaring JSON: {"ok": true}'}], 400, True)
         return ("ok" in out.lower()), f"{time.time() - t:.1f} s"
     except AIError as e:
         return False, str(e)

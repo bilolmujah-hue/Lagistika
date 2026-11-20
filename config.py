@@ -37,14 +37,13 @@ EXTRACT_MODEL = os.getenv("EXTRACT_MODEL", "claude-haiku-5-5")   # hujjat/chek o
 CHAT_MODEL = os.getenv("CHAT_MODEL", "claude-haiku-5-5")         # bot ichidagi suhbat
 DEAL_MODEL = os.getenv("DEAL_MODEL", "claude-haiku-5-5")         # yuk egalari bilan suhbat
 
-# Arzon AI (yuk qidiruvidagi ommaviy tahlil). Bo'sh bo'lsa Claude ishlatiladi. Batafsil: llm.py
+# Arzon AI (yuk qidiruvidagi ommaviy tahlil): asosan admin paneldan qo'shiladi (DeepSeek, OpenAI...).
+# CHEAP_AI_KEY - ixtiyoriy zaxira kalit (OpenAI-mos API). Hammasi ishlamasa Claude ishlatiladi. Batafsil: llm.py
 CHEAP_AI_KEY = os.getenv("CHEAP_AI_KEY", "").strip()
-CHEAP_AI_URL = os.getenv("CHEAP_AI_URL", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions").strip()
-CHEAP_AI_MODEL = os.getenv("CHEAP_AI_MODEL", "gemini-2.5-flash-lite").strip()
-GROQ_API_KEYS = [k.strip() for k in os.getenv("GROQ_API_KEYS", os.getenv("GROQ_API_KEY", "")).split(",") if k.strip()]
-GROQ_URL = os.getenv("GROQ_URL", "https://api.groq.com/openai/v1/chat/completions").strip()
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
-DEAL_PROVIDER = os.getenv("DEAL_PROVIDER", "claude").strip().lower()   # "cheap" = suhbat ham arzon AI da
+CHEAP_AI_URL = os.getenv("CHEAP_AI_URL", "https://api.deepseek.com/chat/completions").strip()
+CHEAP_AI_MODEL = os.getenv("CHEAP_AI_MODEL", "deepseek-chat").strip()
+DEAL_PROVIDER = os.getenv("DEAL_PROVIDER", "claude").strip().lower()   # "cheap" = suhbat avval arzon AI da (xato bo'lsa Claude)
+PLAN_MODEL = os.getenv("PLAN_MODEL", os.getenv("EXTRACT_MODEL", "claude-haiku-5-5"))  # Claude: yo'nalish rejasi (joy nomlari barcha tillarda)
 MAX_PARSE_PER_SEARCH = int(os.getenv("MAX_PARSE_PER_SEARCH", "400"))   # 1 qidiruvda AI ga yuboriladigan YANGI e'lonlar chegarasi
 
 DB_PATH = os.getenv("DB_PATH", "logistika.db")
@@ -84,7 +83,7 @@ MAX_DMS_PER_SEARCH = int(os.getenv("MAX_DMS_PER_SEARCH", "8"))
 DM_DELAY = (60, 180)          # bitta pool userbotdan yangi odamlarga yozish orasidagi kutish (soniya)
 USER_DM_DELAY = (25, 70)      # foydalanuvchining o'z akkauntidan yangi mijozlarga yozish orasidagi kutish (ban bo'lmasligi uchun)
 SEARCH_TIMEOUT = int(os.getenv("SEARCH_TIMEOUT", "150"))          # bitta qidiruv eng ko'pi necha soniya (2.5 daqiqa)
-SEARCH_GLOBAL_LIMIT = int(os.getenv("SEARCH_GLOBAL_LIMIT", "400"))  # 1 userbot, 1 so'z uchun eng ko'pi nechta xabar
+SEARCH_GLOBAL_LIMIT = int(os.getenv("SEARCH_GLOBAL_LIMIT", "500"))  # 1 userbot, 1 so'z uchun eng ko'pi nechta xabar
 UNLIMITED = 10 ** 9           # VIP uchun "cheksiz"
 MAX_AI_TURNS = 8
 LEAD_COOLDOWN_DAYS = 7        # bir odamga shuncha kun ichida qayta yozilmaydi (barcha foydalanuvchilar bo'yicha)

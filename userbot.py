@@ -11,6 +11,7 @@ Sessiyalar bazada (SESSION_KEY bo'lsa shifrlangan) saqlanadi. Uzilgan akkauntlar
 orqali avtomatik qayta ulanadi.
 """
 import asyncio
+import hashlib
 import logging
 import random
 import re
@@ -26,7 +27,8 @@ import database as dbm
 CLIENTS: dict = {}       # account_id -> TelegramClient
 ME: dict = {}            # account_id -> akkauntning o'z Telegram ID si
 _LOGIN: dict = {}        # ulanish jarayoni: kim ulayapti (bot user_id) -> {...}
-GROUP_CACHE: dict = {}   # account_id -> [{"chat_id","title","can_write","why"}]
+GROUP_CACHE: dict = {}   # account_id -> [{"chat_id","title","can_write","why"}]  (faqat guruhlar)
+SEARCH_CHATS: dict = {}  # account_id -> [{"chat_id","title"}]  (guruhlar + kanallar - yuk qidiruvi uchun)
 LAST_SEND: dict = {}     # (account_id, peer_id) -> vaqt (o'zimiz yozganini "qo'lda" deb adashmaslik uchun)
 _ACC_LOCKS: dict = {}    # account_id -> Lock (bir akkauntdan yangi odamlarga navbat bilan yozish)
 SEARCH_COOLDOWN: dict = {}  # account_id -> unix vaqt (FloodWait olgan akkaunt qidiruvdan vaqtincha chetlanadi)
@@ -63,9 +65,10 @@ def search_pool() -> list:
 
 
 def groups_total(accounts) -> int:
+    """Qidiruvdagi takrorlanmas guruh + kanallar soni."""
     ids = set()
     for a in accounts:
-        for g in GROUP_CACHE.get(a["id"], []):
+        for g in SEARCH_CHATS.get(a["id"]) or GROUP_CACHE.get(a["id"], []):
             ids.add(g["chat_id"])
     return len(ids)
 
@@ -248,6 +251,7 @@ async def remove(aid: int, logout: bool = True):
                 pass
     ME.pop(aid, None)
     GROUP_CACHE.pop(aid, None)
+    SEARCH_CHATS.pop(aid, None)
     dbm.acc_delete(aid)
 
 
@@ -355,13 +359,17 @@ def write_status(ent):
 
 
 async def list_groups(aid: int) -> list:
-    """Akkauntdagi barcha guruhlar (kanallar emas) + yozish mumkinmi."""
-    out = []
+    """Akkauntdagi barcha guruhlar + yozish mumkinmi. Yo'l-yo'lakay kanallar ham SEARCH_CHATS ga yoziladi."""
+    out, chats = [], []
     async for d in CLIENTS[aid].iter_dialogs():
         if d.is_group:
             ok, why = write_status(d.entity)
             out.append({"chat_id": d.id, "title": d.name or str(d.id), "can_write": ok, "why": why})
+            chats.append({"chat_id": d.id, "title": d.name or str(d.id)})
+        elif d.is_channel:
+            chats.append({"chat_id": d.id, "title": d.name or str(d.id)})
     GROUP_CACHE[aid] = out
+    SEARCH_CHATS[aid] = chats
     return out
 
 
@@ -381,21 +389,52 @@ def _make_dict(m, s, chat, chat_id):
     }
 
 
+_UNAME_RE = re.compile(r"(?<![\w@])@([A-Za-z][A-Za-z0-9_]{4,31})")
+
+
+def _post_dict(m, chat, chat_id):
+    """Kanal posti (yoki guruhga kanal nomidan yozilgan xabar): yuboruvchi - odam emas, shuning uchun
+    matndagi @username yoki telefon kontakt sifatida olinadi. Kontakt bo'lmasa None."""
+    text = (getattr(m, "message", None) or "").strip()
+    if not text:
+        return None
+    own = (getattr(chat, "username", None) or "").lower()
+    uname = next((u for u in _UNAME_RE.findall(text)
+                  if u.lower() != own and not u.lower().endswith("bot")), None)
+    phone = norm_phone(text)
+    if not uname and not phone:
+        return None
+    contact = (uname or phone).lower()
+    pseudo = -int(hashlib.sha1(contact.encode()).hexdigest()[:12], 16)  # odam ID si noma'lum - barqaror soxta ID
+    cu = getattr(chat, "username", None)
+    link = (f"https://t.me/{cu}/{m.id}" if cu else f"https://t.me/c/{str(chat_id).replace('-100', '', 1)}/{m.id}")
+    title = getattr(chat, "title", "") or ""
+    return {"msg_id": m.id, "chat_id": chat_id, "text": text, "date": m.date, "sender_id": pseudo,
+            "access_hash": None, "username": uname, "name": (f"@{uname}" if uname else phone) + f" ({title[:20]})",
+            "link": link, "chat_title": title}
+
+
 def _msg_dict(m, chat_id=None):
-    """Telethon (custom) xabari -> lug'at."""
-    return _make_dict(m, m.sender, m.chat, chat_id or m.chat_id)
+    """Telethon (custom) xabari -> lug'at (odam yozgan xabar yoki kanal posti)."""
+    cid = chat_id or m.chat_id
+    if isinstance(m.sender, types.User):
+        return _make_dict(m, m.sender, m.chat, cid)
+    if m.sender is None or isinstance(m.sender, types.Channel):
+        return _post_dict(m, m.chat, cid)
+    return None
 
 
 async def search_global(aid: int, query: str, since, limit: int = 400) -> list:
-    """Telegram GLOBAL qidiruvi: akkaunt a'zo bo'lgan BARCHA guruhlardan bitta so'rov bilan (faqat guruhlar).
-    30-50 ta guruhni birma-bir o'qishdan o'nlab marta tez. Eng yangi xabarlardan boshlab `since` gacha."""
+    """Telegram GLOBAL qidiruvi: akkaunt a'zo bo'lgan BARCHA guruh va kanallardan bitta so'rov bilan.
+    30-50 ta chatni birma-bir o'qishdan o'nlab marta tez. Eng yangi xabarlardan boshlab `since` gacha.
+    Kanal postlarida kontakt (@username / telefon) matndan olinadi."""
     c = CLIENTS[aid]
     out, got = [], 0
     rate, opeer, oid = 0, types.InputPeerEmpty(), 0
     while got < limit:
         r = await c(functions.messages.SearchGlobalRequest(
             q=query, filter=types.InputMessagesFilterEmpty(), min_date=since, max_date=None,
-            offset_rate=rate, offset_peer=opeer, offset_id=oid, limit=100, groups_only=True))
+            offset_rate=rate, offset_peer=opeer, offset_id=oid, limit=100))
         msgs = getattr(r, "messages", None) or []
         if not msgs:
             break
@@ -409,18 +448,19 @@ async def search_global(aid: int, query: str, since, limit: int = 400) -> list:
             if m.date < since:
                 stop = True
                 break
-            chat = None
             p = m.peer_id
             if isinstance(p, types.PeerChannel):
                 chat = chats.get(p.channel_id)
-                if isinstance(chat, types.Channel) and chat.broadcast and not chat.megagroup:
-                    continue
             elif isinstance(p, types.PeerChat):
                 chat = chats.get(p.chat_id)
             else:
-                continue
-            s = users.get(getattr(m.from_id, "user_id", None))
-            d = _make_dict(m, s, chat, utils.get_peer_id(p))
+                continue  # shaxsiy chatlar kerak emas
+            cid = utils.get_peer_id(p)
+            fid = getattr(m.from_id, "user_id", None)
+            if fid:
+                d = _make_dict(m, users.get(fid), chat, cid)
+            else:
+                d = _post_dict(m, chat, cid)
             if d:
                 out.append(d)
         if stop or len(msgs) < 100 or not isinstance(r, types.messages.MessagesSlice):
@@ -450,7 +490,7 @@ async def fetch_messages(aid: int, chat_id: int, since, limit: int = 3000) -> li
 
 
 async def search_messages(aid: int, query: str, since, limit: int = 200, chat=None) -> list:
-    """Bitta guruh ichida Telegram qidiruvi (global qidiruv kam natija bersa - zaxira bosqich)."""
+    """Bitta guruh/kanal ichida Telegram qidiruvi (global qidiruv kam natija bersa - zaxira bosqich)."""
     out = []
     async for m in CLIENTS[aid].iter_messages(chat, search=query, limit=limit, wait_time=0.3):
         if m.date < since:
@@ -480,14 +520,15 @@ async def resolve_peer(aid: int, user_id: int, access_hash=None, username=None, 
     """Shu akkaunt uchun odamning InputPeerUser i: access_hash -> kesh -> @username -> telefon (kontaktga qo'shib).
     Topilmasa None."""
     c = CLIENTS[aid]
-    if access_hash:
+    if access_hash and user_id and user_id > 0:
         return types.InputPeerUser(user_id, access_hash)
-    try:
-        p = await c.get_input_entity(user_id)
-        if isinstance(p, types.InputPeerUser):
-            return p
-    except (ValueError, TypeError):
-        pass
+    if user_id and user_id > 0:
+        try:
+            p = await c.get_input_entity(types.PeerUser(user_id))
+            if isinstance(p, types.InputPeerUser):
+                return p
+        except (ValueError, TypeError, KeyError):
+            pass
     if username:
         try:
             p = await c.get_input_entity(username)
