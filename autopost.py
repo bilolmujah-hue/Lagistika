@@ -5,6 +5,7 @@
 - Guruh yozishni taqiqlasa / ban qilsa - shu guruh avtomatik o'chiriladi va foydalanuvchi ogohlantiriladi.
 - Telegram cheklov qo'ysa (FloodWait/PeerFlood) - kampaniya pauza qilinadi (akkaunt ban bo'lmasligi uchun).
 - Obuna tugasa kampaniya to'xtaydi.
+- VIP tarif berilgan foydalanuvchida kunlik va guruhlar soni limiti yo'q.
 """
 import asyncio
 import logging
@@ -117,7 +118,7 @@ async def run_once(c):
             return
         dbm.ap_update(uid, last_run=dbm.now_iso())
         day = dbm.today().isoformat()
-        cap = config.AP_MAX_PER_GROUP_DAY
+        cap = config.UNLIMITED if dbm.is_unlimited(uid) else config.AP_MAX_PER_GROUP_DAY
         capped = 0
         for g in groups:
             if dbm.ap_count(c["id"], g["chat_id"], day) >= cap:
@@ -185,12 +186,13 @@ def status(uid) -> dict:
     acc, cl = userbot.user_client(uid)
     groups = dbm.ap_groups(c["id"])
     day = dbm.today().isoformat()
+    unl = dbm.is_unlimited(uid)
     return {
         "akkaunt": ((acc["name"] or acc["phone"] or f"#{acc['id']}") if acc else None), "ulangan": bool(cl),
         "holat": "ishlamoqda" if c["active"] else "to'xtatilgan",
         "pauza_gacha": dbm.fmt_dt(c["paused_until"], True) if dbm._dt(c.get("paused_until")) and
         dbm._dt(c["paused_until"]) > _now() else None,
-        "interval_daqiqa": c["interval_min"], "kunlik_limit_guruhga": config.AP_MAX_PER_GROUP_DAY,
+        "interval_daqiqa": c["interval_min"], "kunlik_limit_guruhga": "cheksiz (VIP)" if unl else config.AP_MAX_PER_GROUP_DAY,
         "matn": c.get("text"), "bugun_yuborildi": dbm.ap_sent_today(c["id"], day),
         "guruhlar": [{"nomi": g["title"], "faol": bool(g["active"]), "izoh": g["note"],
                       "bugun": dbm.ap_count(c["id"], g["chat_id"], day)} for g in groups],
@@ -202,16 +204,19 @@ def menu(uid):
     c = dbm.ap_get(uid)
     lines = ["📢 Avto xabar\n"]
     if not st["akkaunt"]:
+        lim = "cheksiz (VIP)" if dbm.is_unlimited(uid) else f"ko'pi bilan {config.AP_MAX_PER_GROUP_DAY} ta"
         lines.append("Bot sizning Telegram akkauntingiz orqali tanlangan guruhlarga e'loningizni "
-                     f"muntazam yuboradi (har guruhga kuniga ko'pi bilan {config.AP_MAX_PER_GROUP_DAY} ta).\n\n"
-                     "Boshlash uchun akkauntingizni ulang 👇")
+                     f"muntazam yuboradi (har guruhga kuniga {lim}).\n\n"
+                     "Shu akkaunt yuk qidiruvida topilgan mijozlar bilan suhbat uchun ham ishlatiladi - "
+                     "faqat bir marta ulanadi.\n\nBoshlash uchun akkauntingizni ulang 👇")
         return "\n".join(lines), K(inline_keyboard=[[B(text="🔗 Akkaunt ulash", callback_data="ap:connect")]])
     active_groups = sum(1 for g in st["guruhlar"] if g["faol"])
     lines += [
         f"👤 Akkaunt: {st['akkaunt']} {'✅' if st['ulangan'] else '❌ (ulanmagan)'}",
         f"{'▶️ Ishlamoqda' if c['active'] else '⏸ To' + chr(39) + 'xtatilgan'}"
         + (f" (pauza {st['pauza_gacha']} gacha)" if st["pauza_gacha"] else ""),
-        f"⏱ Har {st['interval_daqiqa']} daqiqada · har guruhga kuniga ≤{st['kunlik_limit_guruhga']} ta",
+        f"⏱ Har {st['interval_daqiqa']} daqiqada · har guruhga kuniga "
+        + (f"≤{st['kunlik_limit_guruhga']} ta" if isinstance(st['kunlik_limit_guruhga'], int) else "cheksiz ⭐"),
         f"📡 Guruhlar: {len(st['guruhlar'])} ta (faol {active_groups})",
         f"📤 Bugun yuborildi: {st['bugun_yuborildi']} ta",
         "",

@@ -1,17 +1,22 @@
 """Telegram userbot akkauntlari (Telethon). Uch xil akkaunt bor:
 
-  pool - admin qo'shadigan "yuk qidirish" akkauntlari (masalan 10 ta). Guruhlardan e'lon o'qiydi va
-         barcha foydalanuvchilar nomidan yuk egalari bilan lichkada AI orqali gaplashadi.
+  pool - admin qo'shadigan "yuk qidirish" akkauntlari (masalan 10 ta). Qidiruvda HAMMASI BIR VAQTDA
+         ishlaydi: har biri a'zo bo'lgan barcha guruhlardan Telegram serverining global qidiruvi orqali
+         e'lon topadi (bitta so'rov = 30-50 ta guruh).
   pay  - to'lov akkaunti. @CardXabarBot shu akkauntga kartaga tushgan pullarni xabar qiladi.
-  user - foydalanuvchining shaxsiy akkaunti ("Avto xabar" uchun guruhlarga e'lon yuboradi).
+  user - foydalanuvchining shaxsiy akkaunti. BIR MARTA ulanadi va ikki ish uchun ishlatiladi:
+         (1) "Avto xabar" - guruhlarga e'lon; (2) topilgan mijozlar bilan lichkada AI suhbat.
 
-Sessiyalar bazada (SESSION_KEY bo'lsa shifrlangan) saqlanadi.
+Sessiyalar bazada (SESSION_KEY bo'lsa shifrlangan) saqlanadi. Uzilgan akkauntlar watchdog_loop()
+orqali avtomatik qayta ulanadi.
 """
 import asyncio
 import logging
+import random
+import re
 import time
 
-from telethon import TelegramClient, errors, events, types
+from telethon import TelegramClient, errors, events, functions, types, utils
 from telethon.sessions import StringSession
 
 import config
@@ -21,9 +26,17 @@ import database as dbm
 CLIENTS: dict = {}       # account_id -> TelegramClient
 ME: dict = {}            # account_id -> akkauntning o'z Telegram ID si
 _LOGIN: dict = {}        # ulanish jarayoni: kim ulayapti (bot user_id) -> {...}
-GROUP_CACHE: dict = {}   # account_id -> [{"chat_id","title"}]
+GROUP_CACHE: dict = {}   # account_id -> [{"chat_id","title","can_write","why"}]
 LAST_SEND: dict = {}     # (account_id, peer_id) -> vaqt (o'zimiz yozganini "qo'lda" deb adashmaslik uchun)
 _ACC_LOCKS: dict = {}    # account_id -> Lock (bir akkauntdan yangi odamlarga navbat bilan yozish)
+SEARCH_COOLDOWN: dict = {}  # account_id -> unix vaqt (FloodWait olgan akkaunt qidiruvdan vaqtincha chetlanadi)
+_WD_NOTIFIED: dict = {}
+
+
+def _new_client(session: str = "") -> TelegramClient:
+    return TelegramClient(StringSession(session), config.TG_API_ID, config.TG_API_HASH,
+                          device_model="Logistika Bot", system_version="1.0", app_version="1.0",
+                          flood_sleep_threshold=15, connection_retries=10, retry_delay=2, auto_reconnect=True)
 
 
 def is_connected(aid) -> bool:
@@ -41,6 +54,20 @@ def acc_lock(aid) -> asyncio.Lock:
 
 def connected_pool() -> list:
     return [a for a in dbm.acc_list("pool", active_only=True) if is_connected(a["id"])]
+
+
+def search_pool() -> list:
+    """Qidiruvga tayyor pool akkauntlar (ulangan va FloodWait da emas)."""
+    now = time.time()
+    return [a for a in connected_pool() if SEARCH_COOLDOWN.get(a["id"], 0) < now]
+
+
+def groups_total(accounts) -> int:
+    ids = set()
+    for a in accounts:
+        for g in GROUP_CACHE.get(a["id"], []):
+            ids.add(g["chat_id"])
+    return len(ids)
 
 
 def pay_client():
@@ -69,8 +96,7 @@ async def login_start(uid: int, phone: str):
     if not config.TG_API_ID or not config.TG_API_HASH:
         raise RuntimeError("TG_API_ID va TG_API_HASH sozlanmagan (my.telegram.org dan oling)")
     await login_cancel(uid)
-    c = TelegramClient(StringSession(), config.TG_API_ID, config.TG_API_HASH,
-                       device_model="Logistika Bot", system_version="1.0", app_version="1.0")
+    c = _new_client()
     await c.connect()
     try:
         sent = await c.send_code_request(phone)
@@ -128,33 +154,36 @@ async def _activate(aid: int, kind: str, c: TelegramClient):
         pass
     _attach(aid, kind, c)
     dbm.acc_update(aid, status="ok")
-    asyncio.create_task(_warm(aid))
+    asyncio.create_task(_warm(aid, kind))
 
 
 async def start_all():
-    """Bot ishga tushganda saqlangan barcha akkauntlarni qayta ulaydi."""
+    """Bot ishga tushganda saqlangan barcha akkauntlarni PARALLEL qayta ulaydi."""
     if not config.TG_API_ID or not config.TG_API_HASH:
         logging.warning("TG_API_ID/TG_API_HASH yo'q - userbotlar ishga tushirilmadi")
         return
-    for row in dbm.acc_list():
-        if not row["active"]:
-            continue
-        await connect_row(row)
+    rows = [r for r in dbm.acc_list() if r["active"]]
+    sem = asyncio.Semaphore(5)
+
+    async def one(r):
+        async with sem:
+            await connect_row(r)
+
+    await asyncio.gather(*(one(r) for r in rows))
 
 
 async def connect_row(row) -> bool:
     aid = row["id"]
     try:
-        c = TelegramClient(StringSession(core.dec(row["session"])), config.TG_API_ID, config.TG_API_HASH,
-                           device_model="Logistika Bot", system_version="1.0", app_version="1.0")
+        c = _new_client(core.dec(row["session"]))
         await c.connect()
         if not await c.is_user_authorized():
             await c.disconnect()
             dbm.acc_update(aid, status="expired", active=0)
             msg = f"⚠️ Userbot sessiyasi tugagan: {row['name'] or row['phone']} ({row['kind']}). Qaytadan ulang."
             if row["kind"] == "user":
-                await core.send(row["owner_id"], "⚠️ «Avto xabar» uchun ulangan akkauntingiz sessiyasi tugadi. "
-                                                 "«📢 Avto xabar» bo'limidan qaytadan ulang.")
+                await core.send(row["owner_id"], "⚠️ Ulangan Telegram akkauntingiz sessiyasi tugadi (avto xabar va "
+                                                 "mijozlar bilan suhbat uchun). «📢 Avto xabar» bo'limidan qaytadan ulang.")
             else:
                 await core.notify_admins(msg)
             return False
@@ -164,6 +193,43 @@ async def connect_row(row) -> bool:
         logging.exception("Akkauntni ulab bo'lmadi (#%s)", aid)
         dbm.acc_update(aid, status=f"xato: {e}"[:200])
         return False
+
+
+async def watchdog_loop():
+    """Har 90 soniyada: faol, lekin uzilib qolgan akkauntlarni qayta ulaydi. Pool uzilsa - adminga xabar."""
+    while True:
+        await asyncio.sleep(90)
+        if not config.TG_API_ID or not config.TG_API_HASH:
+            continue
+        try:
+            for row in dbm.acc_list(active_only=True):
+                aid = row["id"]
+                if is_connected(aid):
+                    continue
+                c = CLIENTS.get(aid)
+                if c:
+                    try:
+                        await c.connect()
+                        if c.is_connected() and await c.is_user_authorized():
+                            continue
+                    except Exception:
+                        pass
+                ok = await connect_row(row)
+                if ok:
+                    logging.info("Akkaunt qayta ulandi: #%s", aid)
+                elif row["kind"] == "pool" and time.time() - _WD_NOTIFIED.get(aid, 0) > 3 * 3600:
+                    _WD_NOTIFIED[aid] = time.time()
+                    await core.notify_admins(f"🔴 Userbot #{aid} ({row['name'] or row['phone']}) uzilib qoldi va qayta "
+                                             "ulanmayapti. 🛠 Admin panel → 🤖 Userbotlar dan tekshiring.")
+        except Exception:
+            logging.exception("Watchdog xatosi")
+
+
+async def reconnect_all_pool() -> tuple:
+    """Admin paneldan: barcha pool akkauntlarni qayta ulash. -> (ulandi, jami)"""
+    rows = [r for r in dbm.acc_list("pool") if r["active"]]
+    res = await asyncio.gather(*(connect_row(r) for r in rows))
+    return sum(1 for x in res if x), len(rows)
 
 
 async def remove(aid: int, logout: bool = True):
@@ -222,7 +288,8 @@ def describe_error(e: Exception) -> str:
 # ====================================================================== KELGAN XABARLAR
 
 def _attach(aid: int, kind: str, c: TelegramClient):
-    if kind == "pool":
+    if kind in ("pool", "user"):
+        # pool va foydalanuvchi akkauntlari: mijozlar javobini AI suhbatga uzatamiz
         @c.on(events.NewMessage(incoming=True))
         async def _incoming(ev):
             if not ev.is_private:
@@ -260,10 +327,14 @@ def _attach(aid: int, kind: str, c: TelegramClient):
 
 # ====================================================================== GURUHLAR
 
-async def _warm(aid: int):
-    """Qayta ishga tushgandan keyin dialoglarni Telethon xotirasiga yuklaydi (guruhga yozish uchun kerak)."""
+async def _warm(aid: int, kind: str = ""):
+    """Ulangandan keyin dialoglarni Telethon xotirasiga yuklaydi (guruhga yozish uchun kerak).
+    Pool akkauntlar uchun guruhlar ro'yxati ham keshlanadi (qidiruv statistikasi uchun)."""
     try:
-        await CLIENTS[aid].get_dialogs(limit=500)
+        if kind == "pool":
+            await list_groups(aid)
+        else:
+            await CLIENTS[aid].get_dialogs(limit=500)
     except Exception:
         logging.warning("Dialoglarni yuklab bo'lmadi (#%s)", aid, exc_info=True)
 
@@ -294,14 +365,11 @@ async def list_groups(aid: int) -> list:
     return out
 
 
-def _msg_dict(m, chat_id=None):
-    """Telethon xabari -> lug'at. Oddiy foydalanuvchi yozmagan bo'lsa None."""
-    text = (m.raw_text or "").strip()
-    s = m.sender
+def _make_dict(m, s, chat, chat_id):
+    """Xabar + yuboruvchi + chat -> lug'at. Oddiy foydalanuvchi yozmagan bo'lsa None."""
+    text = (getattr(m, "message", None) or "").strip()
     if not text or not isinstance(s, types.User) or s.bot or s.deleted or s.is_self:
         return None
-    chat_id = chat_id or m.chat_id
-    chat = m.chat
     uname = getattr(chat, "username", None)
     link = (f"https://t.me/{uname}/{m.id}" if uname
             else f"https://t.me/c/{str(chat_id).replace('-100', '', 1)}/{m.id}")
@@ -311,6 +379,62 @@ def _msg_dict(m, chat_id=None):
         "name": " ".join(x for x in (s.first_name, s.last_name) if x) or "Noma'lum",
         "link": link, "chat_title": getattr(chat, "title", "") or "",
     }
+
+
+def _msg_dict(m, chat_id=None):
+    """Telethon (custom) xabari -> lug'at."""
+    return _make_dict(m, m.sender, m.chat, chat_id or m.chat_id)
+
+
+async def search_global(aid: int, query: str, since, limit: int = 400) -> list:
+    """Telegram GLOBAL qidiruvi: akkaunt a'zo bo'lgan BARCHA guruhlardan bitta so'rov bilan (faqat guruhlar).
+    30-50 ta guruhni birma-bir o'qishdan o'nlab marta tez. Eng yangi xabarlardan boshlab `since` gacha."""
+    c = CLIENTS[aid]
+    out, got = [], 0
+    rate, opeer, oid = 0, types.InputPeerEmpty(), 0
+    while got < limit:
+        r = await c(functions.messages.SearchGlobalRequest(
+            q=query, filter=types.InputMessagesFilterEmpty(), min_date=since, max_date=None,
+            offset_rate=rate, offset_peer=opeer, offset_id=oid, limit=100, groups_only=True))
+        msgs = getattr(r, "messages", None) or []
+        if not msgs:
+            break
+        users = {u.id: u for u in r.users}
+        chats = {ch.id: ch for ch in r.chats}
+        stop = False
+        for m in msgs:
+            got += 1
+            if not isinstance(m, types.Message):
+                continue
+            if m.date < since:
+                stop = True
+                break
+            chat = None
+            p = m.peer_id
+            if isinstance(p, types.PeerChannel):
+                chat = chats.get(p.channel_id)
+                if isinstance(chat, types.Channel) and chat.broadcast and not chat.megagroup:
+                    continue
+            elif isinstance(p, types.PeerChat):
+                chat = chats.get(p.chat_id)
+            else:
+                continue
+            s = users.get(getattr(m.from_id, "user_id", None))
+            d = _make_dict(m, s, chat, utils.get_peer_id(p))
+            if d:
+                out.append(d)
+        if stop or len(msgs) < 100 or not isinstance(r, types.messages.MessagesSlice):
+            break
+        last = msgs[-1]
+        rate = getattr(r, "next_rate", None) or 0
+        oid = last.id
+        ch = chats.get(getattr(last.peer_id, "channel_id", None) or getattr(last.peer_id, "chat_id", None))
+        try:
+            opeer = utils.get_input_peer(ch) if ch else types.InputPeerEmpty()
+        except Exception:
+            break
+        await asyncio.sleep(0.3)
+    return out
 
 
 async def fetch_messages(aid: int, chat_id: int, since, limit: int = 3000) -> list:
@@ -326,10 +450,9 @@ async def fetch_messages(aid: int, chat_id: int, since, limit: int = 3000) -> li
 
 
 async def search_messages(aid: int, query: str, since, limit: int = 200, chat=None) -> list:
-    """Telegram serverining o'z qidiruvi. chat=None - akkaunt a'zo bo'lgan BARCHA chatlar bo'yicha (global).
-    Faqat so'z mos kelgan xabarlar qaytadi - 500 ta guruhni to'liq o'qish shart emas."""
+    """Bitta guruh ichida Telegram qidiruvi (global qidiruv kam natija bersa - zaxira bosqich)."""
     out = []
-    async for m in CLIENTS[aid].iter_messages(chat, search=query, limit=limit, wait_time=1):
+    async for m in CLIENTS[aid].iter_messages(chat, search=query, limit=limit, wait_time=0.3):
         if m.date < since:
             break
         if chat is None and not m.is_group:
@@ -342,20 +465,60 @@ async def search_messages(aid: int, query: str, since, limit: int = 200, chat=No
 
 # ====================================================================== LICHKAGA YOZISH
 
-async def send_dm(aid: int, user_id: int, access_hash, text: str, username=None):
-    """Odamga lichkada yozadi ("yozmoqda..." ko'rsatib). Telethon xatolari chaqiruvchida ushlanadi."""
+def norm_phone(s):
+    """E'londagi telefon -> +998901234567 ko'rinishi (o'qib bo'lmasa None)."""
+    for m in re.finditer(r"\+?\d[\d\s\-()]{7,17}\d", s or ""):
+        d = re.sub(r"\D", "", m.group(0))
+        if len(d) == 9:
+            d = "998" + d
+        if 11 <= len(d) <= 13:
+            return "+" + d
+    return None
+
+
+async def resolve_peer(aid: int, user_id: int, access_hash=None, username=None, phone=None, name=None):
+    """Shu akkaunt uchun odamning InputPeerUser i: access_hash -> kesh -> @username -> telefon (kontaktga qo'shib).
+    Topilmasa None."""
     c = CLIENTS[aid]
     if access_hash:
-        peer = types.InputPeerUser(user_id, access_hash)
-    elif username:
-        peer = await c.get_input_entity(username)
-    else:
-        peer = user_id
-    LAST_SEND[(aid, user_id)] = time.time()
+        return types.InputPeerUser(user_id, access_hash)
+    try:
+        p = await c.get_input_entity(user_id)
+        if isinstance(p, types.InputPeerUser):
+            return p
+    except (ValueError, TypeError):
+        pass
+    if username:
+        try:
+            p = await c.get_input_entity(username)
+            if isinstance(p, types.InputPeerUser):
+                return p
+        except (ValueError, TypeError, errors.UsernameNotOccupiedError, errors.UsernameInvalidError):
+            pass
+    ph = norm_phone(phone)
+    if ph:
+        try:
+            r = await c(functions.contacts.ImportContactsRequest([types.InputPhoneContact(
+                client_id=random.randrange(1, 2 ** 62), phone=ph, first_name=(name or "Mijoz")[:60], last_name="")]))
+            if r.users:
+                u = r.users[0]
+                return types.InputPeerUser(u.id, u.access_hash)
+        except errors.FloodWaitError:
+            raise
+        except Exception:
+            logging.info("Telefon orqali topib bo'lmadi: %s", ph)
+    return None
+
+
+async def send_dm(aid: int, peer, text: str):
+    """Odamga lichkada yozadi ("yozmoqda..." ko'rsatib). Telethon xatolari chaqiruvchida ushlanadi."""
+    c = CLIENTS[aid]
+    pid = getattr(peer, "user_id", peer)
+    LAST_SEND[(aid, pid)] = time.time()
     try:
         async with c.action(peer, "typing"):
             await asyncio.sleep(min(7.0, 1.0 + len(text) / 30))
         msg = await c.send_message(peer, text)
     finally:
-        LAST_SEND[(aid, user_id)] = time.time()
+        LAST_SEND[(aid, pid)] = time.time()
     return msg

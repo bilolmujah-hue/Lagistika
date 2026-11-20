@@ -6,6 +6,7 @@ userbotlar (yuk qidirish akkauntlari pool i), GPS so'rovlari, VIP ro'yxati, admi
 """
 import asyncio
 import io
+import time
 import json
 import logging
 
@@ -44,7 +45,7 @@ SETTING_TITLES = {
     "pay_window_min": ("⏳ To'lov vaqti (daq)", "To'lov uchun necha daqiqa beriladi? Masalan 10"),
     "user_dm_day": ("💬 Kunlik DM limiti", "Bitta foydalanuvchi uchun kuniga eng ko'pi nechta e'lon egasiga yoziladi?"),
     "search_results": ("🔎 Qidiruv natijalari", "Bitta qidiruvda nechta e'lon topilsa to'xtasin? (tavsiya: 5)"),
-    "search_hours": ("🕒 Qidiruv soatlari", "Guruhlarda necha soat orqaga qidirilsin? (tavsiya: 12)"),
+    "search_hours": ("🕒 Qidiruv soatlari", "Guruhlarda necha soat orqaga qidirilsin? (tavsiya: 24)"),
     "support": ("🆘 Yordam @username", "Foydalanuvchilar murojaat qiladigan @username yuboring"),
 }
 NUMERIC = {"price", "period_days", "trial_days", "pay_window_min", "user_dm_day", "search_results", "search_hours"}
@@ -109,7 +110,7 @@ def stats_text():
             f"  Jami: {core.money(s['rev_all'])} so'm ({s['pay_all']} ta)\n\n"
             f"🚛 Furalar: {s['vehicles']} · 👤 Haydovchilar (baza): {s['drivers_db']} · 📄 Hujjatlar: {s['docs']}\n"
             f"📍 GPS ulanganlar: {s['gps_users']}\n🔎 Qidiruvlar: {s['searches']} · 💬 Yozilgan e'lon egalari: {s['leads']}\n"
-            f"📢 Faol avto xabarlar: {s['campaigns']}\n\n"
+            f"📢 Faol avto xabarlar: {s['campaigns']} · 📱 Ulangan foydalanuvchi akkauntlari: {s['user_accs']}\n\n"
             f"🤖 AI chaqiruvlari (ishga tushgandan beri): arzon AI {llm.STATS['cheap']} · Claude {llm.STATS['claude']} · "
             f"xato {llm.STATS['errors']}\n"
             f"Arzon AI: {'✅ ' + str(len(dbm.ai_list(True))) + ' ta faol' if llm.cheap_enabled() else '❌ ulanmagan (hammasi Claude da)'}")
@@ -266,21 +267,27 @@ async def send_review(admin_id, p):
 def pool_view():
     accs = dbm.acc_list("pool")
     lines = ["🤖 YUK QIDIRISH USERBOTLARI\n",
-             f"Har biri kuniga {config.MAX_DMS_PER_ACCOUNT_DAY} tagacha yangi odamga yozadi. "
-             "Ko'proq akkaunt = ko'proq foydalanuvchiga xizmat.\n"]
+             "Qidiruvda HAMMASI BIR VAQTDA ishlaydi: har biri a'zo bo'lgan barcha guruhlardan global qidiruv qiladi. "
+             "Ko'proq akkaunt va guruh = tezroq va ko'proq natija.\n"
+             "Mijozlarga endi foydalanuvchining o'z akkauntidan yoziladi; userbot faqat zaxira "
+             f"(kuniga {config.MAX_DMS_PER_ACCOUNT_DAY} tagacha).\n"]
     rows = []
     for a in accs:
         on = userbot.is_connected(a["id"])
         icon = "🟢" if on else ("⏸" if not a["active"] else "🔴")
         g = len(dbm.pool_groups(a["id"]))
+        allg = len(userbot.GROUP_CACHE.get(a["id"], []))
         dm = dbm.dms_today_account(a["id"])
-        lines.append(f"{icon} #{a['id']} {a['name'] or a['phone']} · guruh: {g} · bugun: {dm}/{config.MAX_DMS_PER_ACCOUNT_DAY}")
+        cd = userbot.SEARCH_COOLDOWN.get(a["id"], 0) - time.time()
+        lines.append(f"{icon} #{a['id']} {a['name'] or a['phone']} · guruhlar: {allg} (tanlangan {g}) · "
+                     f"bugun DM: {dm}/{config.MAX_DMS_PER_ACCOUNT_DAY}" + (f" · ⏳ {int(cd // 60) + 1} daq dam" if cd > 0 else ""))
         rows.append([B(text=f"{icon} #{a['id']} {a['name'] or a['phone']}"[:60], callback_data=f"ad:acc:{a['id']}")])
     if not accs:
         lines.append("Hali userbot yo'q. «➕ Akkaunt qo'shish» ni bosing.")
-    groups = dbm.pool_all_groups()
-    lines.append(f"\n📡 Jami kuzatilayotgan guruhlar (takrorlanmas): {len(groups)}")
-    rows.append([B(text="➕ Akkaunt qo'shish", callback_data="ad:pooladd")])
+    lines.append(f"\n📡 Qidiruvdagi jami guruhlar (takrorlanmas): {userbot.groups_total(accs)}")
+    lines.append(f"📱 Foydalanuvchilar ulagan akkauntlar: {len(dbm.acc_list('user', active_only=True))}")
+    rows.append([B(text="➕ Akkaunt qo'shish", callback_data="ad:pooladd"),
+                 B(text="🔄 Hammasini qayta ulash", callback_data="ad:poolre")])
     rows.append(back())
     return "\n".join(lines), K(inline_keyboard=rows)
 
@@ -397,7 +404,11 @@ def ai_view():
         lines.append("Hali AI qo'shilmagan - hozir hammasi Claude da (qimmat). «➕ AI qo'shish» ni bosing.")
     lines.append(f"\n📊 Ishga tushgandan beri: arzon AI {llm.STATS['cheap']} · Claude {llm.STATS['claude']} · "
                  f"xato {llm.STATS['errors']}")
-    rows.append([B(text="➕ AI qo'shish", callback_data="ad:aiadd")])
+    rot = dbm.setting("ai_rotate") != "0"
+    lines.append("🔄 Rejim: " + ("navbatma-navbat (yuk barcha AI larga teng taqsimlanadi)" if rot
+                                 else "ustuvorlik bo'yicha (doim birinchisidan)"))
+    rows.append([B(text="➕ AI qo'shish", callback_data="ad:aiadd"),
+                 B(text="🔄 Navbat: ✅" if rot else "🔄 Navbat: ❌", callback_data="ad:airot")])
     rows.append(back())
     return "\n".join(lines), K(inline_keyboard=rows)
 
@@ -437,7 +448,7 @@ async def ai_finish(m: Message, uid: int, w: dict, model: str):
 
 def vip_view():
     users = dbm.list_users("vip", 0, 50)
-    lines = ["⭐ VIP FOYDALANUVCHILAR (botdan bepul foydalanadi)\n"]
+    lines = ["⭐ VIP FOYDALANUVCHILAR (bepul + BARCHA limitlarsiz: yozish, qidiruv, avto xabar)\n"]
     rows = []
     for u in users:
         lines.append(f"⭐ {_uname(u)} · {u['user_id']}")
@@ -628,7 +639,7 @@ async def handle_input(m: Message, w: dict):
         core.WAIT.pop(uid, None)
         tid = int(text)
         dbm.set_user(tid, vip=1)
-        await core.send(tid, "⭐ Sizga VIP maqom berildi - bot siz uchun to'liq bepul! /start")
+        await core.send(tid, "⭐ Sizga VIP tarif berildi - bot siz uchun to'liq bepul va BARCHA limitlarsiz (yuk qidirish, mijozlarga yozish, avto xabar)! /start")
         t, kb = vip_view()
         await m.answer(f"✅ {tid} VIP qilindi.\n\n" + t, reply_markup=kb)
     elif k == "admin:admadd":
@@ -688,7 +699,7 @@ async def cb_admin(cb: CallbackQuery):
             dbm.set_user(tid, blocked=0)
         elif act == "vipon":
             dbm.set_user(tid, vip=1)
-            await core.send(tid, "⭐ Sizga VIP maqom berildi - bot siz uchun to'liq bepul!")
+            await core.send(tid, "⭐ Sizga VIP tarif berildi - bot siz uchun to'liq bepul va BARCHA limitlarsiz (yuk qidirish, mijozlarga yozish, avto xabar)!")
         elif act == "vipoff":
             dbm.set_user(tid, vip=0)
         elif act == "end":
@@ -869,6 +880,15 @@ async def cb_admin(cb: CallbackQuery):
     elif act == "aidel":
         dbm.ai_delete(int(p[2]))
         await view(ai_view())
+    elif act == "airot":
+        dbm.set_setting("ai_rotate", "0" if dbm.setting("ai_rotate") != "0" else "1")
+        await view(ai_view())
+    elif act == "poolre":
+        await cb.answer("🔄 Qayta ulanmoqda...")
+        ok, n = await userbot.reconnect_all_pool()
+        await view(pool_view())
+        await msg.answer(f"🔄 Qayta ulandi: {ok}/{n}")
+        return
 
     # ---- VIP / adminlar
     elif act == "vip":

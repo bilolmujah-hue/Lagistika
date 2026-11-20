@@ -5,9 +5,13 @@ Tartib:
   2) Railway Variables dagi GROQ_API_KEYS, CHEAP_AI_KEY (zaxira)
   3) Claude (EXTRACT_MODEL) - eng oxirgi zaxira, bot hech qachon to'xtamaydi.
 
+Navbatma-navbat (ai_rotate=1): har bir so'rov keyingi AI dan boshlanadi - yuk bitta AI ga tushib qolmaydi,
+bepul limitlar tekis sarflanadi. Bir AI ishlamasa - darhol keyingisi.
 Kalit limiti tugasa (429) - vaqtincha chetlanadi va adminga xabar boradi.
 Kalit noto'g'ri bo'lsa (401/403) - o'chiriladi va adminga xabar boradi.
+Ketma-ket 3 marta tarmoq/server xatosi bersa - 10 daqiqaga chetlanadi va adminga xabar boradi.
 """
+import itertools
 import logging
 import re
 import time
@@ -24,6 +28,8 @@ _http = httpx.AsyncClient(timeout=90)
 _claude = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY or "missing")
 _ENV_COOLDOWN: dict = {}
 _NOTIFIED: dict = {}
+_FAILS: dict = {}          # provayder -> ketma-ket xatolar soni
+_RR = itertools.count()    # navbatma-navbat hisoblagich
 STATS = {"cheap": 0, "claude": 0, "errors": 0}
 
 PRESETS = {
@@ -60,7 +66,14 @@ def _providers():
     if config.CHEAP_AI_KEY and _ENV_COOLDOWN.get(config.CHEAP_AI_KEY, 0) < time.time():
         out.append({"id": None, "name": "Gemini (env)", "url": config.CHEAP_AI_URL, "key": config.CHEAP_AI_KEY,
                     "model": config.CHEAP_AI_MODEL})
+    if len(out) > 1 and dbm.setting("ai_rotate") != "0":
+        k = next(_RR) % len(out)
+        out = out[k:] + out[:k]
     return out
+
+
+def _pkey(p) -> str:
+    return f"id{p['id']}" if p["id"] else f"env{p['key'][-8:]}"
 
 
 def cheap_enabled() -> bool:
@@ -122,13 +135,18 @@ async def _handle_error(p, e: AIError):
     logging.warning("AI xatosi %s: %s", label, e)
     if p["id"]:
         dbm.ai_bump(p["id"], False, str(e))
+    if e.kind in ("net", "other"):
+        n = _FAILS[_pkey(p)] = _FAILS.get(_pkey(p), 0) + 1
+        if n >= 3:
+            _FAILS[_pkey(p)] = 0
+            e = AIError("limit", f"ketma-ket 3 marta xato: {e}", 600)
     if e.kind == "limit":
         until = time.time() + e.wait
         if p["id"]:
             dbm.ai_update(p["id"], cooldown_until=(datetime.now(config.TZ) + timedelta(seconds=e.wait)).isoformat(timespec="seconds"))
         else:
             _ENV_COOLDOWN[p["key"]] = until
-        await _notify_once(f"lim:{p['key'][-8:]}", f"⚠️ AI limiti tugadi: {label}\n"
+        await _notify_once(f"lim:{p['key'][-8:]}", f"⚠️ AI vaqtincha ishlamayapti: {label}\nSabab: {e}\n"
                                                     f"{int(e.wait // 60)} daqiqaga chetlandi, boshqa AI ishlatilmoqda.\n"
                                                     "Yangi kalit qo'shish: 🛠 Admin panel → 🧠 AI → ➕ AI qo'shish")
     elif e.kind in ("auth", "model"):
@@ -151,6 +169,7 @@ async def _chain(system, messages, max_tokens, json_mode):
         try:
             out = await call_openai_compat(p["url"], p["key"], p["model"], system, messages, max_tokens, json_mode)
             STATS["cheap"] += 1
+            _FAILS[_pkey(p)] = 0
             if p["id"]:
                 dbm.ai_bump(p["id"], True)
             return out

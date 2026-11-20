@@ -125,14 +125,16 @@ MIGRATIONS = {
               ("driver_rec_id", "INTEGER"), ("company", "TEXT"), ("last_seen", "TEXT"),
               ("trial_used", "INTEGER DEFAULT 0")],
     "drivers": [("tg_user_id", "INTEGER")],
-    "cargo_requests": [("mode", "TEXT DEFAULT 'cargo'")],
-    "leads": [("account_id", "INTEGER"), ("mode", "TEXT")],
+    "cargo_requests": [("mode", "TEXT DEFAULT 'cargo'"), ("parent_id", "INTEGER")],
+    "leads": [("account_id", "INTEGER"), ("mode", "TEXT"), ("peer_id", "INTEGER")],
     "ap_groups": [("last_msg_id", "INTEGER"), ("del_count", "INTEGER DEFAULT 0")],
 }
 
 INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_leads_acc ON leads(account_id, sender_id);
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+CREATE INDEX IF NOT EXISTS idx_leads_peer ON leads(account_id, peer_id);
+CREATE INDEX IF NOT EXISTS idx_leads_req ON leads(user_id, request_id);
 """
 
 STATUS_EMOJI = {
@@ -918,6 +920,14 @@ def has_access(u) -> bool:
     return sub_state(u)[0] in ACTIVE_STATES
 
 
+def is_unlimited(uid) -> bool:
+    """VIP tarif berilgan foydalanuvchi va adminlar uchun barcha limitlar olib tashlanadi."""
+    if is_admin(uid):
+        return True
+    u = get_user(uid)
+    return bool(u and u.get("vip") and not u.get("blocked"))
+
+
 def start_trial(uid, days):
     u = get_user(uid)
     if u and u.get("trial_used"):
@@ -1359,6 +1369,7 @@ def global_stats():
             "searches": one("SELECT COUNT(*) FROM cargo_requests"),
             "leads": one("SELECT COUNT(*) FROM leads WHERE status NOT IN ('new','skipped')"),
             "campaigns": one("SELECT COUNT(*) FROM ap_campaigns WHERE active=1"),
+            "user_accs": one("SELECT COUNT(*) FROM tg_accounts WHERE kind='user' AND active=1"),
             "gps_users": one("SELECT COUNT(*) FROM users WHERE gps_token IS NOT NULL AND gps_token<>''"),
         }
     out["trial"] = count_users("trial")
@@ -1371,12 +1382,28 @@ def global_stats():
 
 # ====================================================================== YUK SO'ROVLARI VA YUK EGALARI (LEAD)
 
-def create_request(uid, origin, destination, note, hours, mode="cargo"):
+def create_request(uid, origin, destination, note, hours, mode="cargo", parent_id=None):
     with db() as c:
         cur = c.execute(
-            "INSERT INTO cargo_requests(user_id, origin, destination, note, hours, mode, created) VALUES(?,?,?,?,?,?,?)",
-            (uid, origin, destination, note, hours, mode, now_iso()))
+            "INSERT INTO cargo_requests(user_id, origin, destination, note, hours, mode, parent_id, created) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (uid, origin, destination, note, hours, mode, parent_id, now_iso()))
         return cur.lastrowid
+
+
+def request_chain_senders(uid, rid) -> set:
+    """«Yana qidirish» uchun: shu so'rov va undan oldingi (ota) so'rovlarda ko'rsatilgan barcha e'lon egalari."""
+    reqs, cur = [], rid
+    with db() as c:
+        while cur and cur not in reqs and len(reqs) < 50:
+            reqs.append(cur)
+            r = c.execute("SELECT parent_id FROM cargo_requests WHERE id=? AND user_id=?", (cur, uid)).fetchone()
+            cur = r["parent_id"] if r else None
+        if not reqs:
+            return set()
+        return {r[0] for r in c.execute(
+            f"SELECT sender_id FROM leads WHERE user_id=? AND request_id IN ({','.join('?' * len(reqs))})",
+            [uid] + reqs)}
 
 
 def get_request(uid, rid):
@@ -1423,7 +1450,7 @@ def get_lead(lead_id):
 
 
 def update_lead(lead_id, **fields):
-    allowed = {"status", "phone", "summary", "contacted_at", "account_id", "access_hash"}
+    allowed = {"status", "phone", "summary", "contacted_at", "account_id", "access_hash", "peer_id"}
     items = [(k, v) for k, v in fields.items() if k in allowed]
     if not items:
         return
@@ -1470,18 +1497,22 @@ def list_leads(uid, rid=None, limit=30):
 def active_lead_by_sender(account_id, sender_id):
     with db() as c:
         r = c.execute(
-            """SELECT * FROM leads WHERE account_id=? AND sender_id=?
+            """SELECT * FROM leads WHERE account_id=? AND (sender_id=? OR peer_id=?)
                AND status IN ('contacted','talking','done','manual') ORDER BY id DESC LIMIT 1""",
-            (account_id, sender_id)).fetchone()
+            (account_id, sender_id, sender_id)).fetchone()
         return dict(r) if r else None
 
 
-def recent_sender_ids(days):
-    """Oxirgi `days` kunda pool akkauntlaridan allaqachon yozilgan odamlar (qayta bezovta qilmaslik uchun)."""
+def recent_sender_ids(days, uid=None):
+    """Oxirgi `days` kunda allaqachon yozilgan odamlar (qayta bezovta qilmaslik uchun).
+    uid berilsa - faqat shu foydalanuvchi nomidan yozilganlar (har kim o'z akkauntidan yozadi)."""
     cutoff = (datetime.now(config.TZ) - timedelta(days=days)).isoformat(timespec="seconds")
+    q, a = "SELECT sender_id FROM leads WHERE contacted_at>=?", [cutoff]
+    if uid is not None:
+        q += " AND user_id=?"
+        a.append(uid)
     with db() as c:
-        return {r[0] for r in c.execute(
-            "SELECT sender_id FROM leads WHERE contacted_at>=?", (cutoff,))}
+        return {r[0] for r in c.execute(q, a)}
 
 
 def dms_today_account(account_id):

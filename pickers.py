@@ -57,7 +57,8 @@ async def show(msg: Message, uid: int, scope: str, aid: int, page: int, refresh=
                  InlineKeyboardButton(text="🧹 Tozalash", callback_data=f"gpc:{scope}:{aid}:{page}")])
     rows.append([InlineKeyboardButton(text="✔️ Tayyor", callback_data=f"gpd:{scope}:{aid}")])
     what = "yuk e'lonlari yoziladigan" if scope == "p" else "avto xabar yuboriladigan"
-    limit = f" (eng ko'pi {config.AP_MAX_GROUPS} ta)" if scope == "a" else ""
+    limit = (f" (eng ko'pi {config.AP_MAX_GROUPS} ta)" if scope == "a" and not dbm.is_unlimited(uid)
+             else (" (cheksiz ⭐)" if scope == "a" else ""))
     text = f"📡 {what.capitalize()} guruhlarni tanlang{limit}.\n✅ = tanlangan. Tanlangan: {len(on)} ta"
     if scope == "a":
         text += ("\n🚫 = bu guruhga yozib bo'lmaydi yoki u xabarlarni o'chiradi (spam xavfi) - tanlab bo'lmaydi.")
@@ -86,7 +87,7 @@ def toggle(uid, scope, aid, chat_id) -> str:
         dbm.pool_set_group(aid, chat_id, title, not on)
     else:
         camp = dbm.ap_ensure(uid)
-        if not on and len(dbm.ap_groups(camp["id"])) >= config.AP_MAX_GROUPS:
+        if not on and not dbm.is_unlimited(uid) and len(dbm.ap_groups(camp["id"])) >= config.AP_MAX_GROUPS:
             return f"Eng ko'pi {config.AP_MAX_GROUPS} ta guruh"
         dbm.ap_set_group(camp["id"], chat_id, title, not on)
     return "Olib tashlandi" if on else "Qo'shildi"
@@ -100,8 +101,9 @@ def select_all(uid, scope, aid):
     else:
         camp = dbm.ap_ensure(uid)
         have = {g["chat_id"] for g in dbm.ap_groups(camp["id"])}
+        cap = config.UNLIMITED if dbm.is_unlimited(uid) else config.AP_MAX_GROUPS
         for g in groups:
-            if len(have) >= config.AP_MAX_GROUPS:
+            if len(have) >= cap:
                 break
             if blocked_reason(g["chat_id"], aid):
                 continue

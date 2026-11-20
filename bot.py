@@ -99,7 +99,7 @@ HELP_MANAGER = """ℹ️ Men logistika yordamchisiman. Menga oddiy yozing - sun'
 • 01928WNA ning sug'urtasi qachon tugaydi?
 • Aliyev Vali +998901234567 haydovchi qo'sh va 01928WNA ga biriktir
 • 01928WNA qayerda? Kecha necha km yurdi?
-• Toshkentdan Moskvaga yuk kerak
+• Toshkent Moskva (yuk qidiradi)
 • Andijondan Almatiga fura kerak
 • Avto xabarni to'xtat
 • Jadval ber
@@ -107,7 +107,7 @@ HELP_MANAGER = """ℹ️ Men logistika yordamchisiman. Menga oddiy yozing - sun'
 👤 Haydovchilar: haydovchini telefon raqami bilan qo'shing. U shu raqam bilan botga kirib «Haydovchi» ni tanlasa - o'z hujjatlari va furasini ko'radi, eslatmalar unga ham boradi.
 🇨🇳 Xitoy navbati: «01928WNA Xitoydan 20.11.2026 ga navbat oldi» - Xitoyga kirish va Rossiyaga chiqish navbatini eslataman.
 📍 GPS: «📍 GPS» tugmasi orqali ulang.
-🔎 Yuk/fura qidirish: «🔎 Yuklarni ko'rish» - guruhlardan topaman va xohlasangiz egalari bilan o'zim gaplashaman.
+🔎 Yuk/fura qidirish: «🔎 Yuk qidirish» ni bosib «Toshkent Andijon» deb yozing - 1-3 daqiqada 5 ta eng mos e'lonni topaman, xohlasangiz egalari bilan sizning akkauntingizdan o'zim gaplashaman.
 📢 Avto xabar: e'loningizni tanlangan guruhlarga avtomatik yuborib turaman.
 
 Rang belgilari: 🟢 30 kundan ko'p · 🟡 30 kungacha · 🔴 7 kun va kam yoki o'tgan · 🔵 muddatsiz · ⚪ hujjat yo'q"""
@@ -462,7 +462,7 @@ async def cb_role(cb: CallbackQuery, u: dict):
             await cb.message.answer(
                 f"🎉 Xush kelibsiz! Sizga {days} kunlik BEPUL sinov berildi ({dbm.fmt_dt(until, True)} gacha) - "
                 "barcha imkoniyatlar ochiq.\n\nBoshlash uchun:\n1️⃣ Fura yoki haydovchi hujjati rasmini yuboring\n"
-                "2️⃣ «📍 GPS» orqali GPS ni ulang\n3️⃣ «🔎 Yuklarni ko'rish» orqali yuk qidiring\n\n"
+                "2️⃣ «📍 GPS» orqali GPS ni ulang\n3️⃣ «🔎 Yuk qidirish» orqali yuk qidiring\n\n"
                 "Yoki shunchaki yozing - men tushunaman 🤖", reply_markup=menu_kb(u))
         else:
             await cb.message.answer("👔 Menejer rejimi.", reply_markup=menu_kb(u))
@@ -716,14 +716,19 @@ async def gps_input(m: Message, w: dict, u: dict):
 
 # ---------------------------------------------------------------------- YUK QIDIRISH
 
-CARGO_HINT = """🔎 Yuk yoki fura qidirish
+CARGO_HINT = """🔎 <b>Yuk / fura qidirish</b>
+━━━━━━━━━━━━━━━━
+Yo'nalishni yozing - shu zahoti qidiraman:
 
-Qayerdan qayerga kerakligini yozing, masalan:
-• «Toshkent Moskva yuk kerak» - furangiz bor, YUK qidiryapsiz
-• «Andijon Almati fura kerak» - yukingiz bor, MASHINA qidiryapsiz
-• «Samarqanddan Rossiyaga tent yuk, 3000$ dan qimmat» - shartlar bilan
-
-Bot yuk guruhlaridagi oxirgi 24 soatlik e'lonlarni tekshiradi va mos e'lonlarni ko'rsatadi. Xohlasangiz, e'lon egalari bilan o'zi gaplashib, narx va shartlarni aniqlab beradi."""
+📦 <code>Toshkent Andijon</code> - yuk qidiradi
+📦 <code>Toshkentdan Moskvaga</code> - yuk qidiradi
+🚛 <code>Andijon Almati fura kerak</code> - bo'sh mashina qidiradi
+📝 <code>Samarqanddan Rossiyaga tent, 20 t</code> - shartlar bilan
+━━━━━━━━━━━━━━━━
+⚡ Barcha userbotlar bir vaqtda yuzlab guruhni tekshiradi
+🎯 1-3 daqiqada oxirgi 1 kunlik 5 ta eng mos e'lon
+🔄 «Yana 5 ta» - boshqa odamlarni topadi
+🤖 Xohlasangiz egalari bilan o'zim gaplashaman"""
 
 
 @dp.message(T(BTN_CARGO))
@@ -731,36 +736,41 @@ async def btn_cargo(m: Message, u: dict):
     if not await need_manager(m, u):
         return
     core.WAIT[m.from_user.id] = {"k": "cargo:q"}
-    await m.answer(CARGO_HINT, reply_markup=K(inline_keyboard=[[B(text="📦 Qidiruvlarim holati", callback_data="cg:status")]]))
+    await m.answer(CARGO_HINT, parse_mode="HTML",
+                   reply_markup=K(inline_keyboard=[[B(text="📦 Qidiruvlarim holati", callback_data="cg:status")]]))
 
 
-_INTENT = re.compile(r"(yuk|юк|груз|gruz|fura|фура|mashina|машин|tent|тент|\bref|реф|transport|транспорт)", re.I)
-_FROM = re.compile(r"(\w(dan|дан|den|tan|тан)\b|\bиз\s|\bс\s|\bfrom\s|→|->|—|\s-\s)", re.I)
-CARGO_EXAMPLE = ("✍️ Iltimos, to'liqroq yozing - qayerDAN, qayerGA va nima kerakligini:\n\n"
-                 "• «Toshkentdan Moskvaga yuk kerak» - furangiz bor, yuk qidiryapsiz\n"
-                 "• «Toshkentdan Moskvaga fura kerak» - yukingiz bor, mashina qidiryapsiz")
+_INTENT = re.compile(r"(yuk|юк|груз|gruz|fura|фура|mashina|машин|tent|тент|\bref\b|реф|transport|транспорт)\w*\s+"
+                     r"(kerak|kk|bor|нужен|нужна|нужно|есть|бор|керак)|(нужн\w*|ищ\w*)\s+(фур|машин|груз|транспорт)",
+                     re.I)
 
 
-async def cargo_input(m: Message):
+async def cargo_input(m: Message, keep_wait=False) -> bool:
+    """«Toshkent Andijon» kabi yozuvdan DARHOL qidiruv boshlaydi. Oddiy holatda AI ishlatilmaydi."""
     uid = m.from_user.id
     text = (m.text or "").strip()
-    if not _INTENT.search(text) or not _FROM.search(text):
-        await m.answer(CARGO_EXAMPLE)
-        return
-    q = await ai.parse_cargo_query(text)
+    q = cargo.quick_route(text)
+    if not q:
+        await m.bot.send_chat_action(m.chat.id, "typing")
+        q = await ai.parse_cargo_query(text)
     if not q.get("origin"):
-        await m.answer("Qayerdan ekanini tushunmadim. Masalan: «Toshkent Moskva yuk kerak»")
-        return
-    core.WAIT.pop(uid, None)
+        await m.answer("🤔 Yo'nalishni tushunmadim. Masalan: «Toshkent Andijon» yoki «Andijon Almati fura kerak»")
+        return False
+    if not keep_wait:
+        core.WAIT.pop(uid, None)
     res = cargo.start_search(uid, q["origin"], q.get("destination") or "", q.get("note") or "", None,
                              q.get("mode") or "cargo")
     if res.get("xato"):
         await m.answer("❌ " + res["xato"])
-        return
-    what = "yuk" if (q.get("mode") or "cargo") == "cargo" else "bo'sh fura"
-    await m.answer(f"🔎 Qidirilmoqda: {q['origin']} → {q.get('destination') or 'istalgan manzil'} ({what})\n"
-                   f"Eng mos {dbm.setting_int('search_results', 5)} ta e'lon topiladi, natija 1-2 daqiqada keladi...",
-                   reply_markup=cargo.stop_kb(res["request_id"]))
+        return False
+    return True
+
+
+async def _edit_kb(msg, rows=None):
+    try:
+        await msg.edit_reply_markup(reply_markup=K(inline_keyboard=rows) if rows else None)
+    except Exception:
+        pass
 
 
 @dp.callback_query(F.data.startswith("cg:"))
@@ -769,26 +779,52 @@ async def cb_cargo(cb: CallbackQuery, u: dict):
         return
     uid = cb.from_user.id
     parts = cb.data.split(":")
-    if parts[1] == "status":
+    act = parts[1]
+    if act == "status":
         await cb.answer()
         await send_long(cb.message, cargo.status_text(uid))
         return
-    if parts[1] == "stop":
+    if act == "stop":
         cargo.cancel(uid, stop_chats=False)
-        await core.safe_edit(cb.message, (cb.message.text or "") + "\n\n⏹ To'xtatildi.")
-        await cb.answer("To'xtatildi")
+        await _edit_kb(cb.message)
+        await cb.answer("⏹ To'xtatildi", show_alert=False)
+        await cb.message.answer("⏹ To'xtatildi. Yangi qidiruv uchun yo'nalishni yozing.")
         return
     rid = int(parts[2])
     if not dbm.get_request(uid, rid):
         await cb.answer("Topilmadi", show_alert=True)
         return
-    if parts[1] == "yes":
-        ok = cargo.start_outreach(uid, rid)
-        await core.safe_edit(cb.message, "🤖 Boshladim! E'lon egalariga birma-bir yozaman (ban bo'lmasligi uchun oraliq bilan). "
-                                         "Har bir suhbat tugagach sizga xulosa va kontaktlarni yuboraman." if ok else
-                             "⏳ Yozish allaqachon davom etmoqda.")
+    if act == "more":
+        res = cargo.search_more(uid, rid)
+        if res.get("xato"):
+            await cb.answer(res["xato"][:190], show_alert=True)
+        else:
+            await cb.answer("🔄 Yana 5 ta yangi odam qidirilmoqda...")
+        return
+    if act == "yes":
+        more = [[B(text="🔄 Yana 5 ta qidirish", callback_data=f"cg:more:{rid}")]]
+        if cargo.outreach_running(uid):
+            await cb.answer("⏳ Yozish allaqachon davom etmoqda", show_alert=True)
+            return
+        acc, cl = userbot.user_client(uid)
+        if cl:
+            cargo.start_outreach(uid, rid)
+            await _edit_kb(cb.message, more)
+            await cb.message.answer(f"🤖 Boshladim! E'lon egalariga sizning akkauntingizdan "
+                                    f"({acc['name'] or acc['phone']}) birma-bir yozaman - ban bo'lmasligi uchun "
+                                    "oraliq bilan. Har bir suhbat tugagach xulosa va kontaktni yuboraman.",
+                                    reply_markup=cargo.stop_kb(rid))
+        elif not config.TG_API_ID or not config.TG_API_HASH:
+            await cb.answer("Bu imkoniyat hozircha sozlanmagan (admin TG_API_ID ni kiritishi kerak).", show_alert=True)
+            return
+        else:
+            await _edit_kb(cb.message, more)
+            await login.begin(cb.message, uid, "user", {"rid": rid})
     else:
-        await core.safe_edit(cb.message, "👍 Yaxshi. Yuqoridagi havolalar va @username lar orqali o'zingiz yozishingiz mumkin.")
+        await _edit_kb(cb.message, [[B(text="🤖 Baribir bot gaplashsin", callback_data=f"cg:yes:{rid}")],
+                                    [B(text="🔄 Yana 5 ta qidirish", callback_data=f"cg:more:{rid}")]])
+        await cb.message.answer("👍 Yaxshi. Natijadagi «E'lonni ochish» havolalari, @username va telefonlar orqali "
+                                "o'zingiz yozishingiz mumkin.")
     await cb.answer()
 
 
@@ -1036,6 +1072,9 @@ async def btn_profile(m: Message, u: dict):
     if u.get("role") == "manager":
         lines.append(f"🏢 Kompaniya: {u.get('company') or '-'} (yuk egalari bilan suhbatda shu nom ishlatiladi)")
         lines.append(f"📍 GPS: {'✅ ulangan' if gps.client_for_user(u) else '❌'}")
+        acc, cl = userbot.user_client(u["user_id"])
+        lines.append("📱 Telegram akkaunt (mijozlar bilan suhbat, avto xabar): " +
+                     (f"✅ {acc['name'] or acc['phone']}" if cl else ("⚠️ uzilgan" if acc else "❌ ulanmagan")))
         rows.append([B(text="🏢 Kompaniya nomi", callback_data="prof:company")])
     elif u.get("manager_id"):
         mu = dbm.get_user(u["manager_id"]) or {}
@@ -1474,6 +1513,10 @@ async def on_text(m: Message, u: dict):
             return
     elif not await need_manager(m, u):
         return
+    # «Toshkent Andijon yuk kerak» kabi aniq so'rov - AI siz, darhol qidiruv (tez va token tejaydi)
+    if u.get("role") != "driver" and _INTENT.search(m.text or "") and cargo.quick_route(m.text):
+        await cargo_input(m, keep_wait=True)
+        return
 
     await m.bot.send_chat_action(m.chat.id, "typing")
     ctx = None
@@ -1514,6 +1557,7 @@ async def main():
     _BG.append(asyncio.create_task(reminders.reminder_loop()))
     _BG.append(asyncio.create_task(payments.loop()))
     _BG.append(asyncio.create_task(autopost.loop()))
+    _BG.append(asyncio.create_task(userbot.watchdog_loop()))
     try:
         await bot.set_my_commands([BotCommand(command="start", description="Boshlash / asosiy menyu"),
                                    BotCommand(command="help", description="Yordam"),

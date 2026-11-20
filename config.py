@@ -73,14 +73,19 @@ DEFAULTS = {
     "support": "",              # yordam uchun @username
     "user_dm_day": "25",        # bitta foydalanuvchi uchun kuniga eng ko'p yuk egasiga yozish
     "search_results": "5",      # bitta qidiruvda nechta e'lon topilsa to'xtaydi
-    "search_hours": "12",       # necha soat orqaga qidiriladi
+    "search_hours": "24",       # necha soat orqaga qidiriladi (1 kunlik natija)
+    "ai_rotate": "1",           # 1 = arzon AI lar navbatma-navbat ishlatiladi (yuk bir joyga tushmaydi)
 }
 
 # --- Yuk qidirish (userbot pool) ---
 SEARCH_HOURS = 24
 MAX_DMS_PER_ACCOUNT_DAY = int(os.getenv("MAX_DMS_PER_ACCOUNT_DAY", "15"))  # 1 userbot kuniga nechta YANGI odamga yozadi
 MAX_DMS_PER_SEARCH = int(os.getenv("MAX_DMS_PER_SEARCH", "8"))
-DM_DELAY = (60, 180)          # bitta userbotdan yangi odamlarga yozish orasidagi kutish (soniya)
+DM_DELAY = (60, 180)          # bitta pool userbotdan yangi odamlarga yozish orasidagi kutish (soniya)
+USER_DM_DELAY = (25, 70)      # foydalanuvchining o'z akkauntidan yangi mijozlarga yozish orasidagi kutish (ban bo'lmasligi uchun)
+SEARCH_TIMEOUT = int(os.getenv("SEARCH_TIMEOUT", "150"))          # bitta qidiruv eng ko'pi necha soniya (2.5 daqiqa)
+SEARCH_GLOBAL_LIMIT = int(os.getenv("SEARCH_GLOBAL_LIMIT", "400"))  # 1 userbot, 1 so'z uchun eng ko'pi nechta xabar
+UNLIMITED = 10 ** 9           # VIP uchun "cheksiz"
 MAX_AI_TURNS = 8
 LEAD_COOLDOWN_DAYS = 7        # bir odamga shuncha kun ichida qayta yozilmaydi (barcha foydalanuvchilar bo'yicha)
 

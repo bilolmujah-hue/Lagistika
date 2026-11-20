@@ -16,10 +16,30 @@
 3. **🤖 Userbotlar → ➕ Akkaunt qo'shish** — yuk qidirish uchun 10 tagacha akkaunt. Har biriga yuk guruhlarini tanlang.
    Alohida (shaxsiy bo'lmagan) raqamlar ishlating.
 
+## Yuk qidirish (yangi)
+- Foydalanuvchi «🔎 Yuk qidirish» ni bosib **«Toshkent Andijon»** deb yozsa - qidiruv darhol boshlanadi (savol berilmaydi).
+  «... fura kerak / mashina kerak» desa - bo'sh mashina qidiriladi. Oddiy so'rovlar AI siz tushuniladi.
+- Admin qo'shgan **barcha userbotlar bir vaqtda** ishlaydi: har biri a'zo bo'lgan barcha guruhlardan Telegram global
+  qidiruvi bilan (1 ta so'rov = 30-50 guruh) oxirgi **24 soatlik** e'lonlarni oladi. Kam chiqsa - guruhma-guruh zaxira qidiruv.
+- Odatda 1-3 daqiqada (eng ko'pi `SEARCH_TIMEOUT`=150 s) **5 ta** eng mos e'lon. Qidiruv paytida jonli holat ko'rinadi.
+- Natija ostida: «🤖 Bot gaplashsin», «🔄 Yana 5 ta qidirish» (oldin ko'rsatilmagan BOSHQA odamlar), «🙋 O'zim yozaman».
+- «Bot gaplashsin» - mijozlarga **foydalanuvchining o'z Telegram akkauntidan** yoziladi. Akkaunt faqat bir marta ulanadi
+  (telefon → kod → 2FA) va keyin qidiruvda ham, «📢 Avto xabar» da ham shu akkaunt ishlatiladi.
+- Aniq e'lonlar AI siz qabul qilinadi, faqat shubhalilari arzon AI ga ketadi (token tejaladi, natijalar keshlanadi).
+
+## VIP tarif
+Admin «⭐ VIP berish» qilgan foydalanuvchida barcha bot limitlari yo'q: kunlik yozish, bir qidiruvdagi yozish,
+avto xabarning guruh va kunlik limitlari. (Telegram'ning o'z spam cheklovlari baribir hisobga olinadi - akkaunt ban bo'lmasligi uchun.)
+
 ## AI kalitlar (🛠 Admin panel → 🧠 AI kalitlar)
 Yuk qidiruvidagi ommaviy ishlar arzon AI larda bajariladi: Groq, OpenRouter (bepul «:free» modellar), Gemini,
 DeepSeek, OpenAI yoki istalgan OpenAI-mos API. «➕ AI qo'shish» → xizmat → kalit → model; bot darhol sinab ko'radi.
-Kalit limiti tugasa yoki ishlamasa - bot keyingisiga o'tadi va adminga xabar yuboradi. Hammasi ishlamasa - Claude.
+AI lar **navbatma-navbat** ishlatiladi (🔄 Navbat tugmasi) - yuk bitta AI ga tushmaydi. Kalit limiti tugasa, ishlamasa
+yoki ketma-ket 3 marta xato bersa - bot keyingisiga o'tadi va adminga xabar yuboradi. Hammasi ishlamasa - Claude.
+
+## Userbotlar barqarorligi
+Uzilib qolgan akkauntlar har 90 soniyada avtomatik qayta ulanadi; ulanmasa adminga xabar keladi.
+Admin panel → 🤖 Userbotlar → «🔄 Hammasini qayta ulash». FloodWait olgan akkaunt qidiruvdan vaqtincha chetlanadi.
 
 ## To'lov qanday aniqlanadi
 Har bir to'lovchiga unikal summa beriladi (masalan **100 347** so'm). @CardXabarBot xabarida «➕ 100 347.00 UZS»

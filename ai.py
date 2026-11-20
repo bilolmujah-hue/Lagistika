@@ -242,9 +242,10 @@ MANAGER_TOOLS = [
     _t("delete_reminder", "Eslatmani o'chirish.", {"reminder_id": I}, ["reminder_id"]),
 
     _t("cargo_search",
-       "YUK yoki FURA QIDIRISH yuk guruhlaridan. mode='cargo' - foydalanuvchining furasi bor, YUK kerak "
-       "('Toshkentdan Moskvaga yuk kerak'); mode='truck' - foydalanuvchining yuki bor, MASHINA kerak "
-       "('Andijondan Almatiga fura kerak'). Natijani bot o'zi keyin yuboradi (tool darhol qaytadi).",
+       "YUK yoki FURA QIDIRISH yuk guruhlaridan (barcha userbotlar bir vaqtda, 1 kunlik e'lonlar, 5 ta eng mosi). "
+       "Foydalanuvchi ikkita joy yozsa ('Toshkent Andijon') - DARHOL chaqiring, so'ramang. "
+       "mode='cargo' (standart) - YUK kerak; mode='truck' - faqat 'fura/mashina kerak' deyilsa. "
+       "Natijani bot o'zi keyin yuboradi (tool darhol qaytadi).",
        {"origin": {"type": "string", "description": "FAQAT joy nomi: shahar, viloyat yoki davlat (masalan 'Pskov'). "
                                                      "Koordinata, qavs va izoh yozmang."},
         "destination": {"type": "string", "description": "FAQAT joy nomi"},
@@ -511,7 +512,7 @@ async def _run_admin_tool(ctx, name, a):
             dbm.set_user(uid, blocked=0)
         elif act == "vip_on":
             dbm.set_user(uid, vip=1)
-            await core.send(uid, "⭐ Sizga VIP maqom berildi - bot siz uchun to'liq bepul!")
+            await core.send(uid, "⭐ Sizga VIP tarif berildi - bot siz uchun to'liq bepul va BARCHA limitlarsiz (yuk qidirish, mijozlarga yozish, avto xabar)!")
         elif act == "vip_off":
             dbm.set_user(uid, vip=0)
         elif act == "extend":
@@ -841,8 +842,8 @@ Hujjat qo'shish/o'zgartirishni so'rasa - "buni menejeringiz qiladi" deng.
     return f"""Siz "Logistika yordamchi" - yuk tashish (fura) kompaniyalari uchun Telegram botdagi aqlli yordamchisiz.
 Bugungi sana: {t.strftime('%d.%m.%Y')}. Foydalanuvchi - MENEJER. Obunasi: {sub}.{admin}
 Siz ulangan manbalar: (1) baza - furalar, haydovchilar, hujjatlar, eslatmalar; (2) GPS (Wialon) - joylashuv, km;
-(3) yuk guruhlari - yuk/fura qidirish va e'lon egalari bilan avtomatik suhbat; (4) avto xabar - foydalanuvchi
-akkaunti orqali guruhlarga e'lon yuborish.
+(3) yuk guruhlari - yuk/fura qidirish va e'lon egalari bilan foydalanuvchining o'z akkauntidan avtomatik suhbat;
+(4) avto xabar - foydalanuvchi akkaunti orqali guruhlarga e'lon yuborish.
 
 Uslub: siz tajribali, xushmuomala logistika dispetcherisiz. Qisqa, aniq va ishonchli yozing, ortiqcha his-hayajon,
 uzr va bo'sh gaplarsiz. Hech qachon "buni qila olmayman" demang - quyidagi tool'lar bilan deyarli hamma narsani
@@ -858,11 +859,12 @@ Qoidalar:
    bir marta "Tasdiqlaysizmi?" deb so'rang. Bajargach eski va yangi qiymatni ayting.
 6. Haydovchi qo'shilganda telefonini ham so'rang - shu raqam bilan haydovchi botga kirsa, o'z hujjatlarini
    ko'radi va eslatmalar unga ham boradi.
-7. "Toshkentdan Moskvaga yuk kerak" -> cargo_search(mode=cargo); "Andijondan Almatiga fura kerak" -> cargo_search(mode=truck).
-   Keyin qisqa "🔎 Qidirilmoqda..." deb yozing - natijani bot o'zi yuboradi. Natijani to'qimang.
-   Agar foydalanuvchi qayerDAN, qayerGA va nima (yuk yoki fura) kerakligini aniq yozmagan bo'lsa (masalan faqat
-   "Toshkent Moskva") - cargo_search ni CHAQIRMANG, bunday so'rang: «Iltimos, to'liqroq yozing: Toshkentdan Moskvaga
-   yuk kerak yoki Toshkentdan Moskvaga fura kerak».
+7. YUK QIDIRISH - DARHOL, qayta so'ramasdan:
+   "Toshkent Andijon", "Toshkent - Moskva", "Toshkentdan Moskvaga", "Toshkentdan Moskvaga yuk kerak" ->
+   cargo_search(origin=birinchi joy, destination=ikkinchi joy, mode=cargo). Ikkita joy nomi yozilsa - bu DOIM qidiruv.
+   Faqat "fura kerak", "mashina kerak", "tent kerak", "нужна машина" deyilsa -> mode=truck. Aks holda doim mode=cargo.
+   Bitta joy yozilsa ("Toshkentdan yuk") - destination bo'sh qoldiring. HECH QACHON aniqlashtiruvchi savol bermang.
+   Keyin faqat 1 jumla yozing: "🔎 Qidiruv boshlandi, natija 1-3 daqiqada keladi." Natijani to'qimang.
    "Bekor qil", "to'xtat", "qidirmay qo'y" -> cargo_cancel; "gaplashishni ham to'xtat" -> cargo_cancel(stop_chats=true).
 8. Avto xabar haqida so'rasa autopost_status / autopost_control. "To'xtat" -> stop, "yoq" -> start.
 9. Obuna, to'lov haqida - subscription_status / open_payment.

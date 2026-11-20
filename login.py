@@ -17,10 +17,18 @@ TITLES = {
 }
 
 
-async def begin(m: Message, uid: int, target: str):
-    core.WAIT[uid] = {"k": "login", "target": target, "step": "phone"}
-    warn = ("⚠️ Ulangan akkaunt orqali bot sizning nomingizdan guruhlarga xabar yuboradi. "
-            "Kod va parol hech kimga (AI ga ham) yuborilmaydi, xabaringiz darhol o'chiriladi.\n"
+async def begin(m: Message, uid: int, target: str, extra: dict = None):
+    """extra={"rid": so'rov_id} - akkaunt ulangach shu qidiruvdagi e'lon egalariga darhol yozish boshlanadi."""
+    core.WAIT[uid] = {"k": "login", "target": target, "step": "phone", **(extra or {})}
+    if target == "user" and (extra or {}).get("rid"):
+        await m.answer(
+            "🤖 Mijozlar bilan SIZNING Telegram akkauntingizdan yozishaman - javoblar ham o'zingizga keladi, "
+            "mijozlar sizni taniydi.\n\n"
+            "🔐 Akkaunt faqat BIR MARTA ulanadi. Keyingi qidiruvlarda ham, «📢 Avto xabar» da ham shu akkaunt "
+            "ishlatiladi - qayta kod so'ralmaydi.")
+    warn = ("⚠️ Ulangan akkaunt orqali bot sizning nomingizdan topilgan mijozlarga lichkada va (avto xabar "
+            "yoqilsa) guruhlarga yozadi. Kod va parol hech kimga (AI ga ham) yuborilmaydi, xabaringiz darhol "
+            "o'chiriladi.\n"
             if target == "user" else
             "⚠️ Bu akkauntga bot to'liq kiradi. Asosiy shaxsiy raqamingizni emas, alohida raqam ishlatish tavsiya etiladi.\n")
     await m.answer(
@@ -55,10 +63,10 @@ async def step(m: Message, w: dict):
                 w["step"] = "password"
                 await m.answer("🔐 Akkauntda 2 bosqichli parol bor. 3) Shu parolni yuboring:")
             else:
-                await _done(m, uid, w["target"])
+                await _done(m, uid, w)
         elif st == "password":
             await userbot.login_password(uid, text)
-            await _done(m, uid, w["target"])
+            await _done(m, uid, w)
     except Exception as e:
         logging.warning("Akkaunt ulashda xato: %s", e)
         msg = userbot.describe_error(e)
@@ -72,7 +80,8 @@ async def step(m: Message, w: dict):
             pass
 
 
-async def _done(m: Message, uid: int, target: str):
+async def _done(m: Message, uid: int, w: dict):
+    target = w["target"]
     core.WAIT.pop(uid, None)
     aid = await userbot.login_finish(uid, target)
     acc = dbm.acc_get(aid)
@@ -91,5 +100,16 @@ async def _done(m: Message, uid: int, target: str):
              "kartangizni ulang - bot tushumlarni shu chat orqali o'qiydi."))
     elif target == "user":
         dbm.ap_ensure(uid)
-        await m.answer(f"✅ Akkaunt ulandi: {who}\n\nEndi avto xabar yuboriladigan guruhlarni tanlang 👇")
-        await pickers.show(m, uid, "a", aid, 0, refresh=True)
+        rid = w.get("rid")
+        if rid and dbm.get_request(uid, rid):
+            import cargo
+            ok = cargo.start_outreach(uid, rid)
+            await m.answer(f"✅ Akkaunt ulandi: {who}\n\n" +
+                           ("🤖 Boshladim! Topilgan e'lon egalariga sizning akkauntingizdan birma-bir yozaman "
+                            "(ban bo'lmasligi uchun oraliq bilan). Har bir suhbat tugagach xulosa va kontaktni "
+                            "yuboraman.\n\n💡 Shu akkaunt «📢 Avto xabar» uchun ham tayyor."
+                            if ok else "⏳ Yozish allaqachon davom etmoqda."))
+        else:
+            await m.answer(f"✅ Akkaunt ulandi: {who}\n\nEndi avto xabar yuboriladigan guruhlarni tanlang 👇\n"
+                           "(Shu akkaunt topilgan mijozlar bilan suhbat uchun ham ishlatiladi.)")
+            await pickers.show(m, uid, "a", aid, 0, refresh=True)
