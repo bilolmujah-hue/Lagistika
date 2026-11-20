@@ -23,7 +23,10 @@ import cargo
 import config
 import core
 import database as dbm
+import doccap
 import gps
+import guide
+import listings
 import login
 import payments
 import pickers
@@ -356,6 +359,41 @@ async def on_broadcast_content(m: Message):
     await admin.bc_preview(m, core.WAIT[m.from_user.id])
 
 
+# ====================================================================== QO'LLANMA VIDEO (admin yuklaydi, /start va /help da chiqadi)
+
+@dp.message(lambda m: m.from_user is not None and core.wait_kind(m.from_user.id) == "admin:guide")
+async def on_guide_upload(m: Message):
+    uid = m.from_user.id
+    if not dbm.is_admin(uid):
+        core.WAIT.pop(uid, None)
+        return
+    if m.text and m.text.startswith("/cancel"):
+        core.WAIT.pop(uid, None)
+        await m.answer("Bekor qilindi.")
+        return
+    if m.video:
+        fid, kind = m.video.file_id, "video"
+    elif m.animation:
+        fid, kind = m.animation.file_id, "animation"
+    elif m.document and (m.document.mime_type or "").startswith("video/"):
+        fid, kind = m.document.file_id, "document"
+    elif m.video_note:
+        await m.answer("Dumaloq video emas, oddiy video yuboring (galereyadan yoki fayl sifatida).")
+        return
+    else:
+        await m.answer("📹 Video yuboring (yoki /cancel).")
+        return
+    core.WAIT.pop(uid, None)
+    dbm.set_setting("guide_file", fid)
+    dbm.set_setting("guide_kind", kind)
+    if (m.caption or "").strip():
+        dbm.set_setting("guide_text", m.caption.strip())
+    await m.answer("✅ Qo'llanma saqlandi. Foydalanuvchilar /start va /help da shunday ko'radi 👇")
+    await guide.send_guide(m.chat.id)
+    text, markup = admin.guide_view()
+    await m.answer(text, reply_markup=markup)
+
+
 # ====================================================================== RO'YXATDAN O'TISH
 
 WELCOME = """Assalomu alaykum! 👋 «Logistika yordamchi» botiga xush kelibsiz.
@@ -390,6 +428,7 @@ def role_kb():
 @dp.message(CommandStart())
 async def cmd_start(m: Message, u: dict):
     core.WAIT.pop(m.from_user.id, None)
+    await guide.send_guide(m.chat.id)
     if not u.get("phone"):
         await m.answer(WELCOME, reply_markup=ReplyKeyboardMarkup(
             keyboard=[[KeyboardButton(text="📱 Raqamni yuborish", request_contact=True)]],
@@ -484,6 +523,7 @@ async def cmd_id(m: Message):
 async def cmd_help(m: Message, u: dict):
     sup = dbm.setting("support")
     tail = f"\n\n🆘 Yordam: {sup}" if sup else ""
+    await guide.send_guide(m.chat.id)
     await m.answer((HELP_DRIVER if u.get("role") == "driver" else HELP_MANAGER) + tail)
 
 
@@ -1378,48 +1418,93 @@ async def on_file(m: Message, u: dict):
             return
         file_id, kind = doc.file_id, "document"
 
+    caption = doccap.group_caption(m.media_group_id, (m.caption or "").strip())
     wait = await m.answer("⏳ Hujjat o'qilmoqda...")
     try:
         buf = io.BytesIO()
         await bot.download(file_id, destination=buf)
-        data = await ai.extract_document(buf.getvalue(), mime, hint=(m.caption or "").strip())
+        data = await ai.extract_document(buf.getvalue(), mime, hint=caption)
     except Exception:
         logging.exception("Hujjatni o'qishda xato")
         await wait.edit_text("❌ Hujjatni o'qib bo'lmadi. Aniqroq rasm yoki PDF yuborib ko'ring.")
         return
 
+    # --- izoh foydalanuvchining aniq ko'rsatmasi: AI natijasidan ustun
+    dt = data.get("doc_type")
+    cap_dt = doccap.doc_type_of(caption, dt)
+    if cap_dt:
+        dt = cap_dt
+    data["doc_type"] = dt if dt in config.ALL_DOCS else None
+    data["expiry_date"] = dbm.parse_date(data.get("expiry_date"))
+    data["issue_date"] = dbm.parse_date(data.get("issue_date"))
+    cap_plate, cap_v = doccap.find_plate(uid, caption)
+    data["plate"] = cap_plate or dbm.norm_plate(data.get("plate"))
+    if cap_v and not data.get("vehicle_model"):
+        data["vehicle_model"] = cap_v.get("model")
+    if not data["plate"] and m.media_group_id:  # albomdagi keyingi rasm - oldingi rasm raqami
+        data["plate"] = doccap.recent_plate(uid, 120)
+    cap_d = doccap.find_driver(uid, caption)
+    data["driver_name"] = (cap_d["name"] if cap_d else None) or dbm.norm_name(data.get("driver_name")) or (
+        doccap.leftover_name(caption) if owner_type_of(data["doc_type"]) == "driver" else None)
+
+    token = uuid.uuid4().hex[:10]
+    if len(PENDING) > 1000:
+        PENDING.clear()
+    PENDING[token] = {"uid": uid, "data": data, "file_id": file_id, "kind": kind}
+    text, markup = _pending_view(token)
+    await wait.edit_text(text, reply_markup=markup)
+
+
+def _pending_view(token):
+    """Hujjat holatiga qarab: yetishmayotgan narsani so'rash (tugmalar bilan) yoki tasdiqlash oynasi."""
+    p = PENDING[token]
+    uid, data = p["uid"], p["data"]
     dt = data.get("doc_type")
     ot = owner_type_of(dt)
     if not ot:
-        await wait.edit_text("🤔 Bu qaysi hujjat ekanini aniqlay olmadim. Rasmga izoh yozib qayta yuboring "
-                             "(masalan: «01928WNA sug'urta Qozog'iston»).")
-        return
-    data["expiry_date"] = dbm.parse_date(data.get("expiry_date"))
-    data["issue_date"] = dbm.parse_date(data.get("issue_date"))
-    plate = dbm.norm_plate(data.get("plate"))
-    dname = dbm.norm_name(data.get("driver_name"))
-    if ot == "vehicle" and not plate:
-        await wait.edit_text("🚛 Bu fura hujjati, lekin fura raqami ko'rinmadi. Rasmga izoh qilib fura raqamini "
-                             "yozib qayta yuboring (masalan: 01928WNA).")
-        return
-    if ot == "driver" and not dname:
-        await wait.edit_text("👤 Bu haydovchi hujjati, lekin ism ko'rinmadi. Rasmga izoh qilib ismini yozib qayta yuboring.")
-        return
+        rows, keys = [], list(config.ALL_DOCS)
+        if data.get("plate") and not data.get("driver_name"):
+            keys = list(config.VEHICLE_DOCS)
+        btns = [B(text=config.ALL_DOCS[k][:28], callback_data=f"pdt:{token}:{k}") for k in keys]
+        rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+        rows.append([B(text="❌ Bekor qilish", callback_data=f"no:{token}")])
+        return ("🤔 Bu qaysi hujjat ekanini aniq bilolmadim. Turini tanlang 👇"
+                + (f"\n🚛 Fura: {data['plate']}" if data.get("plate") else ""), K(inline_keyboard=rows))
+    if ot == "vehicle" and not data.get("plate"):
+        vs = dbm.list_vehicles(uid)
+        last = doccap.recent_plate(uid)
+        vs.sort(key=lambda v: (v["plate"] != last, v["plate"]))
+        btns = [B(text=("⭐ " if v["plate"] == last else "🚛 ") + v["plate"], callback_data=f"pv:{token}:{v['id']}")
+                for v in vs[:24]]
+        rows = [btns[i:i + 3] for i in range(0, len(btns), 3)]
+        rows.append([B(text="✍️ Raqamni yozaman", callback_data=f"pw:{token}")])
+        rows.append([B(text="❌ Bekor qilish", callback_data=f"no:{token}")])
+        return (f"📄 {config.ALL_DOCS[dt]}\n\n🚛 Bu hujjat qaysi furaga tegishli? Hujjatda raqam ko'rinmadi"
+                + (" - ro'yxatdan tanlang yoki raqamni yozing 👇" if vs else " - raqamini yozing 👇")
+                + "\n\n💡 Keyingi safar rasmga izoh yozsangiz (masalan «01928WNA») o'zim bog'layman.",
+                K(inline_keyboard=rows))
+    if ot == "driver" and not data.get("driver_name"):
+        ds = dbm.list_drivers(uid)
+        btns = [B(text="👤 " + d["name"][:24], callback_data=f"pd:{token}:{d['id']}") for d in ds[:24]]
+        rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+        rows.append([B(text="✍️ Ismini yozaman", callback_data=f"pw:{token}")])
+        rows.append([B(text="❌ Bekor qilish", callback_data=f"no:{token}")])
+        return (f"📄 {config.ALL_DOCS[dt]}\n\n👤 Bu hujjat qaysi haydovchiga tegishli? Ro'yxatdan tanlang yoki "
+                "ismini yozing 👇", K(inline_keyboard=rows))
 
-    data["plate"], data["driver_name"] = plate, dname
     label = config.ALL_DOCS[dt]
     lines = ["📄 Hujjat aniqlandi", "", f"Turi: {label}"]
     if ot == "vehicle":
-        lines.append(f"🚛 Fura: {plate}" + (f" ({data['vehicle_model']})" if data.get("vehicle_model") else ""))
+        lines.append(f"🚛 Fura: {data['plate']}" + (f" ({data['vehicle_model']})" if data.get("vehicle_model") else ""))
         if data.get("vin"):
             lines.append(f"VIN: {data['vin']}")
     else:
-        lines.append(f"👤 Haydovchi: {dname}")
+        lines.append(f"👤 Haydovchi: {data['driver_name']}")
     if data.get("doc_number"):
         lines.append(f"Raqami: {data['doc_number']}")
-    if data["issue_date"]:
+    if data.get("issue_date"):
         lines.append(f"Berilgan sana: {dbm.fmt_date(data['issue_date'])}")
-    if data["expiry_date"]:
+    if data.get("expiry_date"):
         d = dbm.days_left(data["expiry_date"])
         note = f"{d} kun qoldi" if d >= 0 else f"MUDDATI O'TGAN ({-d} kun)"
         lines.append(f"Amal qilish muddati: {dbm.fmt_date(data['expiry_date'])} ({note})")
@@ -1430,13 +1515,78 @@ async def on_file(m: Message, u: dict):
     if data.get("confidence") in ("low", "medium"):
         lines.append("⚠️ Hujjat sifati past bo'lishi mumkin, ma'lumotlarni diqqat bilan tekshiring.")
     lines.append("\nSaqlaymizmi?")
+    return "\n".join(lines), K(inline_keyboard=[
+        [B(text="✅ Saqlash", callback_data=f"ok:{token}"), B(text="❌ Bekor qilish", callback_data=f"no:{token}")],
+        [B(text="🔄 Turini o'zgartirish", callback_data=f"pct:{token}"),
+         B(text="✏️ " + ("Furani" if ot == "vehicle" else "Haydovchini") + " o'zgartirish", callback_data=f"pco:{token}")]])
 
-    token = uuid.uuid4().hex[:10]
-    if len(PENDING) > 1000:
-        PENDING.clear()
-    PENDING[token] = {"uid": uid, "data": data, "file_id": file_id, "kind": kind}
-    await wait.edit_text("\n".join(lines), reply_markup=K(inline_keyboard=[[
-        B(text="✅ Saqlash", callback_data=f"ok:{token}"), B(text="❌ Bekor qilish", callback_data=f"no:{token}")]]))
+
+@dp.callback_query(F.data.regexp(r"^(pdt|pv|pd|pw|pct|pco):"))
+async def cb_pending_fix(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    act, token = parts[0], parts[1]
+    p = PENDING.get(token)
+    if not p or p["uid"] != cb.from_user.id:
+        await cb.answer("So'rov eskirgan. Hujjatni qayta yuboring.", show_alert=True)
+        return
+    d = p["data"]
+    if act == "pdt" and parts[2] in config.ALL_DOCS:
+        d["doc_type"] = parts[2]
+    elif act == "pv":
+        v = dbm.get_vehicle(p["uid"], int(parts[2]))
+        if v:
+            d["plate"], d["vehicle_model"] = v["plate"], d.get("vehicle_model") or v.get("model")
+    elif act == "pd":
+        dr = dbm.get_driver(p["uid"], int(parts[2]))
+        if dr:
+            d["driver_name"] = dr["name"]
+    elif act == "pct":
+        d["doc_type"] = None
+    elif act == "pco":
+        if owner_type_of(d.get("doc_type")) == "vehicle":
+            d["plate"] = None
+        else:
+            d["driver_name"] = None
+    elif act == "pw":
+        what = "plate" if owner_type_of(d.get("doc_type")) == "vehicle" else "driver"
+        core.WAIT[cb.from_user.id] = {"k": "docfix", "token": token, "what": what}
+        await cb.answer()
+        await cb.message.answer("✍️ Fura raqamini yozing (masalan: 01928WNA):" if what == "plate"
+                                else "✍️ Haydovchining ism-familiyasini yozing:")
+        return
+    text, markup = _pending_view(token)
+    await core.safe_edit(cb.message, text, markup)
+    await cb.answer()
+
+
+async def docfix_input(m: Message, w: dict):
+    uid = m.from_user.id
+    p = PENDING.get(w["token"])
+    core.WAIT.pop(uid, None)
+    if not p:
+        await m.answer("So'rov eskirgan. Hujjatni qayta yuboring.")
+        return
+    text = (m.text or "").strip()
+    if w["what"] == "plate":
+        plate, v = doccap.find_plate(uid, text)
+        plate = plate or dbm.norm_plate(text)
+        if not (4 <= len(plate) <= 12):
+            core.WAIT[uid] = w
+            await m.answer("Raqam noto'g'ri ko'rinadi. Masalan: 01928WNA")
+            return
+        p["data"]["plate"] = plate
+        if v and not p["data"].get("vehicle_model"):
+            p["data"]["vehicle_model"] = v.get("model")
+    else:
+        d = doccap.find_driver(uid, text)
+        name = d["name"] if d else dbm.norm_name(text)
+        if len(name) < 2:
+            core.WAIT[uid] = w
+            await m.answer("Ismni to'liqroq yozing.")
+            return
+        p["data"]["driver_name"] = name
+    text, markup = _pending_view(w["token"])
+    await m.answer(text, reply_markup=markup)
 
 
 @dp.callback_query(F.data.startswith("ok:"))
@@ -1446,13 +1596,17 @@ async def cb_save(cb: CallbackQuery):
         await cb.answer("So'rov eskirgan. Hujjatni qayta yuboring.", show_alert=True)
         return
     uid, d = p["uid"], p["data"]
-    dt = d["doc_type"]
+    dt = d.get("doc_type")
     ot = owner_type_of(dt)
+    if not ot or (ot == "vehicle" and not d.get("plate")) or (ot == "driver" and not d.get("driver_name")):
+        await cb.answer("Ma'lumot to'liq emas. Hujjatni qayta yuboring.", show_alert=True)
+        return
     if ot == "vehicle":
         oid = dbm.get_or_create_vehicle(uid, d["plate"], d.get("vehicle_model"), d.get("vin"))
+        doccap.remember_plate(uid, d["plate"])
     else:
         oid = dbm.get_or_create_driver(uid, d["driver_name"])
-    doc_id = dbm.save_document(uid, ot, oid, dt, d.get("doc_number"), d["issue_date"], d["expiry_date"],
+    doc_id = dbm.save_document(uid, ot, oid, dt, d.get("doc_number"), d.get("issue_date"), d.get("expiry_date"),
                                d.get("issuer"), d.get("notes"), p["file_id"], p["kind"])
     await core.safe_edit(cb.message, (cb.message.text or "").replace("\nSaqlaymizmi?", "") +
                          f"\n\n✅ Saqlandi (#{doc_id}). Xato bo'lsa, yozing, masalan: «muddatini 06.10.2027 ga o'zgartir».")
@@ -1496,6 +1650,8 @@ async def on_text(m: Message, u: dict):
             await ap_text_input(m)
         elif k == "dph":
             await driver_phone_input(m, w)
+        elif k == "docfix":
+            await docfix_input(m, w)
         elif k == "prof:company":
             core.WAIT.pop(uid, None)
             dbm.set_user(uid, company=(m.text or "").strip()[:80])
@@ -1558,6 +1714,7 @@ async def main():
     _BG.append(asyncio.create_task(payments.loop()))
     _BG.append(asyncio.create_task(autopost.loop()))
     _BG.append(asyncio.create_task(userbot.watchdog_loop()))
+    _BG.append(asyncio.create_task(listings.loop()))
     try:
         await bot.set_my_commands([BotCommand(command="start", description="Boshlash / asosiy menyu"),
                                    BotCommand(command="help", description="Yordam"),

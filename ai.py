@@ -47,7 +47,11 @@ async def _ask(model, content, max_tokens=1200, system=None) -> str:
 def _extract_prompt(hint: str) -> str:
     veh = "\n".join(f'  - "{k}": {v}' for k, v in config.VEHICLE_DOCS.items())
     drv = "\n".join(f'  - "{k}": {v}' for k, v in config.DRIVER_DOCS.items())
-    hint_text = f'\nFoydalanuvchi izohi (ishonchli): "{hint}"' if hint else ""
+    hint_text = (f'\nFoydalanuvchi izohi (ISHONCHLI, hujjatdan ustun turadi): "{hint}"\n'
+                 "Izohda fura raqami (masalan 01928WNA, 019314BA) yoki haydovchi ismi yozilgan bo'lsa - hujjatda "
+                 "ko'rinmasa ham aynan o'shani plate / driver_name ga yozing. Izohda hujjat turi aytilgan bo'lsa "
+                 "(masalan «техпаспорт орка тарафи» = texpasportning orqa tomoni) - shu turni tanlang."
+                 if hint else "")
     return f"""Siz yuk tashish (logistika) kompaniyasi hujjatlarini o'qiydigan yordamchisiz.
 Hujjatlar o'zbek, rus, qozoq, xitoy yoki ingliz tilida bo'lishi mumkin.
 
@@ -76,7 +80,7 @@ Qoidalar:
 - Sanalar hujjatda odatda KUN.OY.YIL tartibida yoziladi. JSON da YYYY-MM-DD qilib yozing.
 - expiry_date = hujjat amal qiladigan OXIRGI kun. Sug'urta polisida "по 06.10.2027" bo'lsa, 2027-10-06.
 - Raqamlar, VIN va davlat raqamini harfma-harf, o'zgartirmasdan ko'chiring.
-- Ko'rinmagan yoki o'qib bo'lmaydigan joyga null yozing. HECH QACHON taxmin qilmang.
+- Ko'rinmagan yoki o'qib bo'lmaydigan joyga null yozing. HECH QACHON taxmin qilmang (izohdagi ma'lumot bundan mustasno).
 - Hujjat yuqoridagi turlarga kirmasa, doc_type = "unknown"."""
 
 

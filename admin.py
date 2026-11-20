@@ -9,6 +9,7 @@ import io
 import time
 import json
 import logging
+import re
 
 from aiogram import F, Router
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
@@ -21,6 +22,8 @@ import config
 import core
 import database as dbm
 import gps
+import guide
+import listings
 import llm
 import login
 import payments
@@ -83,6 +86,7 @@ def home_view(uid):
         [B(text=f"🤖 Userbotlar ({on}/{len(pool)})", callback_data="ad:pool"),
          B(text=f"📍 GPS so'rovlar{f' ({gpsq})' if gpsq else ''}", callback_data="ad:gps")],
         [B(text="🧠 AI kalitlar", callback_data="ad:ai"), B(text="⭐ VIP", callback_data="ad:vip")],
+        [B(text="🚛 E'lon kuzatuvi", callback_data="ad:lm"), B(text="📹 Qo'llanma", callback_data="ad:guide")],
         [B(text="👮 Adminlar", callback_data="ad:admins")],
         [B(text="📣 Xabar yuborish", callback_data="ad:bc"), B(text="📥 Excel", callback_data="ad:xls")],
         [B(text="🔎 Qidirish", callback_data="ad:search"), B(text="🔄 Yangilash", callback_data="ad:home")],
@@ -444,6 +448,56 @@ async def ai_finish(m: Message, uid: int, w: dict, model: str):
     await core.safe_edit(wait, f"✅ Qo'shildi va ishlayapti (#{pid}, javob {info}).\n\n" + t, kb)
 
 
+# ====================================================================== QO'LLANMA VIDEO
+
+def guide_view():
+    has = bool(dbm.setting("guide_file"))
+    text = (dbm.setting("guide_text") or "").strip()
+    lines = ["📹 QO'LLANMA VIDEO\n",
+             "Foydalanuvchi /start yoki /help yozganda shu video va ostida matn chiqadi - bot qanday ishlashini "
+             "qisqacha ko'rsatadi.\n",
+             f"🎬 Video: {'✅ yuklangan' if has else '❌ yuklanmagan'}",
+             f"📝 Matn: {'✏️ o' + chr(39) + 'zingiz yozgan' if text else 'standart matn'}"]
+    rows = [[B(text="📤 Video yuklash" if not has else "🔁 Videoni almashtirish", callback_data="ad:guideup")],
+            [B(text="✏️ Matnni o'zgartirish", callback_data="ad:guidetxt")]]
+    if has:
+        rows.append([B(text="👁 Ko'rish", callback_data="ad:guideshow"),
+                     B(text="🗑 O'chirish", callback_data="ad:guidedel")])
+    rows.append(back())
+    return "\n".join(lines), K(inline_keyboard=rows)
+
+
+# ====================================================================== E'LON KUZATUVI (Autoline, Otomoto, mobile.de)
+
+def lm_view():
+    c = listings.cfg()
+    st = listings.stats()
+    last = listings.STATE.get("last_check")
+    err = listings.STATE.get("last_error")
+    connected = bool(c["email"] and c["pass"])
+    lines = ["🚛 E'LON KUZATUVI\n",
+             "Autoline, Otomoto va mobile.de dagi obunalaringiz bo'yicha yangi e'lonlar Gmail ga keladi - bot ularni "
+             "o'qib, FAQAT adminlarga yuboradi.\n",
+             f"📧 Gmail: {c['email'] + (' ✅' if connected else ' (parol yo' + chr(39) + 'q)') if c['email'] else '❌ ulanmagan'}",
+             f"🔁 Holat: {'▶️ ishlamoqda' if c['on'] and connected else '⏸ to' + chr(39) + 'xtatilgan'}",
+             f"📅 Yil: {c['year']} va undan yangi",
+             f"⏱ Tekshiruv: har {c['interval']} daqiqada",
+             f"📤 Bugun yuborildi: {st['sent_today']} ta e'lon ({st['mails_today']} ta xatdan) · jami {st['total']}",
+             f"🕒 Oxirgi tekshiruv: {dbm.fmt_dt(last, True) if last else '-'}"]
+    if err:
+        lines.append(f"⚠️ Xato: {err}")
+    rows = [[B(text="📧 Gmail ulash" if not connected else "📧 Gmail ni almashtirish", callback_data="ad:lmmail")]]
+    if connected:
+        rows.append([B(text="⏸ To'xtatish" if c["on"] else "▶️ Yoqish", callback_data="ad:lmtog"),
+                     B(text="🔄 Hozir tekshirish", callback_data="ad:lmnow")])
+    rows.append([B(text=f"📅 Yil: {c['year']}", callback_data="ad:lmyear"),
+                 B(text=f"⏱ {c['interval']} daq", callback_data="ad:lmint")])
+    if connected:
+        rows.append([B(text="🔌 Gmail ni uzish", callback_data="ad:lmoff")])
+    rows.append(back())
+    return "\n".join(lines), K(inline_keyboard=rows)
+
+
 # ====================================================================== VIP / ADMINLAR
 
 def vip_view():
@@ -642,6 +696,58 @@ async def handle_input(m: Message, w: dict):
         await core.send(tid, "⭐ Sizga VIP tarif berildi - bot siz uchun to'liq bepul va BARCHA limitlarsiz (yuk qidirish, mijozlarga yozish, avto xabar)! /start")
         t, kb = vip_view()
         await m.answer(f"✅ {tid} VIP qilindi.\n\n" + t, reply_markup=kb)
+    elif k == "admin:guidetext":
+        core.WAIT.pop(uid, None)
+        if text in ("-", "0", "standart"):
+            dbm.set_setting("guide_text", "")
+        else:
+            dbm.set_setting("guide_text", text[:3000])
+        t, kb = guide_view()
+        await m.answer("✅ Matn saqlandi.\n\n" + t, reply_markup=kb)
+    elif k == "admin:lmemail":
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[a-z]{2,}", text.lower()):
+            await m.answer("Email noto'g'ri. Masalan: deepseekn2@gmail.com")
+            return
+        w.update(k="admin:lmpass", email=text.lower())
+        await m.answer("🔑 Endi Google «ilova paroli» ni yuboring (16 harf, bo'shliqlar bilan bo'lsa ham bo'ladi).\n"
+                       "Xabaringiz darhol o'chiriladi. Bekor qilish: /cancel")
+    elif k == "admin:lmpass":
+        try:
+            await m.delete()
+        except Exception:
+            pass
+        pwd = text.replace(" ", "")
+        if len(pwd) < 12:
+            await m.answer("Ilova paroli 16 harfdan iborat bo'ladi. Qayta yuboring yoki /cancel.")
+            return
+        wait = await m.answer("⏳ Gmail ga ulanib tekshirilmoqda...")
+        ok, why = await asyncio.to_thread(listings.test_login, w["email"], pwd)
+        if not ok:
+            await core.safe_edit(wait, f"❌ Ulanib bo'lmadi: {why}\nIlova parolini qayta yuboring yoki /cancel.")
+            return
+        core.WAIT.pop(uid, None)
+        dbm.set_setting("lm_email", w["email"])
+        dbm.set_setting("lm_pass", core.enc(pwd))
+        dbm.set_setting("lm_on", "1")
+        listings.STATE["last_error"] = ""
+        t, kb = lm_view()
+        await core.safe_edit(wait, "✅ Gmail ulandi va kuzatuv yoqildi. Birinchi tekshiruv bir necha daqiqada.\n\n" + t, kb)
+    elif k == "admin:lmyear":
+        if not text.isdigit() or not (1990 <= int(text) <= 2030):
+            await m.answer("Yilni raqamda yuboring, masalan 2022.")
+            return
+        core.WAIT.pop(uid, None)
+        dbm.set_setting("lm_year", text)
+        t, kb = lm_view()
+        await m.answer("✅ Saqlandi.\n\n" + t, reply_markup=kb)
+    elif k == "admin:lmint":
+        if not text.isdigit() or not (3 <= int(text) <= 180):
+            await m.answer("Daqiqani 3 dan 180 gacha raqamda yuboring, masalan 5.")
+            return
+        core.WAIT.pop(uid, None)
+        dbm.set_setting("lm_interval", text)
+        t, kb = lm_view()
+        await m.answer("✅ Saqlandi.\n\n" + t, reply_markup=kb)
     elif k == "admin:admadd":
         if not config.is_super(uid):
             core.WAIT.pop(uid, None)
@@ -889,6 +995,57 @@ async def cb_admin(cb: CallbackQuery):
         await view(pool_view())
         await msg.answer(f"🔄 Qayta ulandi: {ok}/{n}")
         return
+
+    # ---- qo'llanma video
+    elif act == "guide":
+        await view(guide_view())
+    elif act == "guideup":
+        core.WAIT[uid] = {"k": "admin:guide"}
+        await msg.answer("📤 Qo'llanma videosini yuboring (galereyadan video yoki fayl).\n"
+                         "Videoga izoh yozsangiz - u ostidagi matn bo'ladi. Bekor qilish: /cancel")
+    elif act == "guidetxt":
+        core.WAIT[uid] = {"k": "admin:guidetext"}
+        cur = (dbm.setting("guide_text") or "").strip()
+        await msg.answer("✏️ Video ostida chiqadigan matnni yuboring (eng ko'pi 1000 belgi - shunda video bilan bitta "
+                         "xabarda chiqadi).\nStandart matnga qaytarish uchun «-» yuboring." +
+                         (f"\n\nHozirgi matn:\n{cur}" if cur else ""))
+    elif act == "guideshow":
+        if not await guide.send_guide(msg.chat.id):
+            alert = "Video yuborib bo'lmadi - qayta yuklang"
+    elif act == "guidedel":
+        dbm.set_setting("guide_file", "")
+        await view(guide_view())
+        alert = "O'chirildi"
+
+    # ---- e'lon kuzatuvi
+    elif act == "lm":
+        await view(lm_view())
+    elif act == "lmmail":
+        core.WAIT[uid] = {"k": "admin:lmemail"}
+        await msg.answer("📧 E'lon xatlari keladigan Gmail manzilini yuboring (masalan deepseekn2@gmail.com).\n"
+                         "Bekor qilish: /cancel")
+    elif act == "lmtog":
+        dbm.set_setting("lm_on", "0" if listings.cfg()["on"] else "1")
+        await view(lm_view())
+    elif act == "lmnow":
+        await cb.answer("🔄 Tekshirilmoqda...")
+        r = await listings.check_now(manual=True)
+        await view(lm_view())
+        await msg.answer(f"❌ {r['error']}" if r["error"] else
+                         f"✅ Tekshirildi: {r['mails']} ta yangi xat, {r['sent']} ta e'lon yuborildi"
+                         + (f", {r['skipped_year']} tasi yili eski" if r["skipped_year"] else ""))
+        return
+    elif act == "lmyear":
+        core.WAIT[uid] = {"k": "admin:lmyear"}
+        await msg.answer("📅 Qaysi yildan boshlab yuborilsin? Masalan: 2022")
+    elif act == "lmint":
+        core.WAIT[uid] = {"k": "admin:lmint"}
+        await msg.answer("⏱ Gmail necha daqiqada bir tekshirilsin? (3-180, tavsiya: 5)")
+    elif act == "lmoff":
+        dbm.set_setting("lm_pass", "")
+        dbm.set_setting("lm_on", "0")
+        await view(lm_view())
+        alert = "Gmail uzildi"
 
     # ---- VIP / adminlar
     elif act == "vip":
